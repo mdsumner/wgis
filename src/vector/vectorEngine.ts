@@ -20,7 +20,7 @@
 
 import { RenderContext } from '../engine/types';
 import { copyIndex } from '../core/wrap';
-import { Feature, GeomKind, VectorData, vertexCount } from './types';
+import { Feature, GeomKind, VectorData, featureBounds, vertexCount } from './types';
 import { DensifiedPart, DisplayPath, densifyParts, runAsync, runSync } from './densify';
 import { makeProjector, Projector } from './project';
 
@@ -41,7 +41,7 @@ export function defaultVectorStyle(stroke: string): VectorStyle {
 }
 
 /** One feature as the display sees it. */
-interface DisplayFeature {
+export interface DisplayFeature {
   kind: GeomKind;
   /** Lines and outlines (and, for points, single-point paths). */
   paths: DisplayPath[];
@@ -81,7 +81,7 @@ export class VectorEngine {
   readonly data: VectorData;
   private style: VectorStyle;
   private onChange: () => void;
-  private readonly nVertices: number;
+  private nVertices: number;
   /** The features thinned for the coarse pass, made on first need. */
   private thinned: Feature[] | null = null;
 
@@ -123,6 +123,50 @@ export class VectorEngine {
   invalidate(): void {
     this.key = '';
     this.thinned = null;
+    this.nVertices = vertexCount(this.data.features);
+    this.data.bounds = featureBounds(this.data.features);
+  }
+
+  /**
+   * The topmost feature under a screen point (CSS pixels), or -1. Tested
+   * against what is drawn: points and lines within tolPx, polygons inside
+   * their fill (or on their outline when they could not be filled).
+   */
+  hitTest(ctx: RenderContext, sx: number, sy: number, tolPx = 6): number {
+    const { view } = ctx;
+    const s = Math.pow(2, view.zoom);
+    let x = view.centreX + (sx - view.width / 2) / s;
+    let y = view.centreY - (sy - view.height / 2) / s;
+    if (ctx.wrap) {
+      // Display geometry lives in the base copy of the world.
+      const k = copyIndex(ctx.wrap, x, y);
+      x -= k * ctx.wrap.tx;
+      y -= k * ctx.wrap.ty;
+    }
+    const d = tolPx / s;
+    for (let i = this.display.length - 1; i >= 0; i--) {
+      const f = this.display[i];
+      if (x < f.minX - d || x > f.maxX + d || y < f.minY - d || y > f.maxY + d) continue;
+      if (f.kind === 'polygon' && f.fill && insideRings(f.fill, x, y)) return i;
+      for (const p of f.paths) {
+        const xy = p.xy;
+        if (xy.length === 2) {
+          if (Math.hypot(xy[0] - x, xy[1] - y) <= d) return i;
+          continue;
+        }
+        for (let k = 0; k + 3 < xy.length; k += 2) {
+          if (segDist(x, y, xy[k], xy[k + 1], xy[k + 2], xy[k + 3]) <= d) return i;
+        }
+      }
+    }
+    return -1;
+  }
+
+  /** Draw some of this layer's features in another style (selection highlight). */
+  drawSubset(g: CanvasRenderingContext2D, ctx: RenderContext, indices: Iterable<number>, style: VectorStyle): void {
+    const subset: DisplayFeature[] = [];
+    for (const i of indices) if (this.display[i]) subset.push(this.display[i]);
+    drawDisplay(g, ctx, subset, style);
   }
 
   private run(ctx: RenderContext, depth: { maxDepth: number; budget: number }, coarse: boolean): Promise<void> {
@@ -177,69 +221,7 @@ export class VectorEngine {
   }
 
   draw(g: CanvasRenderingContext2D, ctx: RenderContext): void {
-    const { view } = ctx;
-    const s = Math.pow(2, view.zoom);
-    const hw = view.width / 2, hh = view.height / 2;
-    const vx0 = view.centreX - hw / s, vx1 = view.centreX + hw / s;
-    const vy0 = view.centreY - hh / s, vy1 = view.centreY + hh / s;
-
-    // Copies of the world the view touches, when the projection repeats.
-    let kMin = 0, kMax = 0;
-    const w = ctx.wrap;
-    if (w) {
-      kMin = Infinity; kMax = -Infinity;
-      for (const [x, y] of [[vx0, vy0], [vx1, vy0], [vx0, vy1], [vx1, vy1]]) {
-        const k = copyIndex(w, x, y);
-        kMin = Math.min(kMin, k);
-        kMax = Math.max(kMax, k);
-      }
-      kMin -= 1; kMax += 1;
-    }
-
-    const st = this.style;
-    g.save();
-    g.globalAlpha = st.opacity;
-    g.strokeStyle = st.stroke;
-    g.fillStyle = st.stroke;
-    g.lineWidth = st.width;
-    g.lineJoin = 'round';
-    g.lineCap = 'round';
-
-    for (let k = kMin; k <= kMax; k++) {
-      const ox = w ? k * w.tx : 0, oy = w ? k * w.ty : 0;
-      // display -> CSS pixels, y up -> y down
-      const tx = (x: number) => (x + ox - view.centreX) * s + hw;
-      const ty = (y: number) => hh - (y + oy - view.centreY) * s;
-      const x0 = vx0 - ox, x1 = vx1 - ox, y0 = vy0 - oy, y1 = vy1 - oy;
-
-      for (const f of this.display) {
-        if (f.maxX < x0 || f.minX > x1 || f.maxY < y0 || f.minY > y1) continue;
-        if (f.kind === 'point') {
-          g.beginPath();
-          for (const p of f.paths) {
-            const px = tx(p.xy[0]), py = ty(p.xy[1]);
-            g.moveTo(px + st.radius, py);
-            g.arc(px, py, st.radius, 0, Math.PI * 2);
-          }
-          g.globalAlpha = st.opacity * 0.6;
-          g.fill();
-          g.globalAlpha = st.opacity;
-          g.stroke();
-          continue;
-        }
-        if (f.fill && st.fillOpacity > 0) {
-          g.beginPath();
-          for (const r of f.fill) trace(g, r, tx, ty, true);
-          g.globalAlpha = st.opacity * st.fillOpacity;
-          g.fill('evenodd');
-          g.globalAlpha = st.opacity;
-        }
-        g.beginPath();
-        for (const p of f.paths) trace(g, p.xy, tx, ty, p.closed);
-        g.stroke();
-      }
-    }
-    g.restore();
+    drawDisplay(g, ctx, this.display, this.style);
   }
 
   status(): VectorStatus {
@@ -262,6 +244,91 @@ export class VectorEngine {
     this.generation++;
     this.display = [];
   }
+}
+
+/** Draw display features on a 2D canvas, once per copy of the world the view touches. */
+export function drawDisplay(g: CanvasRenderingContext2D, ctx: RenderContext, display: DisplayFeature[], st: VectorStyle): void {
+  const { view } = ctx;
+  const s = Math.pow(2, view.zoom);
+  const hw = view.width / 2, hh = view.height / 2;
+  const vx0 = view.centreX - hw / s, vx1 = view.centreX + hw / s;
+  const vy0 = view.centreY - hh / s, vy1 = view.centreY + hh / s;
+
+  // Copies of the world the view touches, when the projection repeats.
+  let kMin = 0, kMax = 0;
+  const w = ctx.wrap;
+  if (w) {
+    kMin = Infinity; kMax = -Infinity;
+    for (const [x, y] of [[vx0, vy0], [vx1, vy0], [vx0, vy1], [vx1, vy1]]) {
+      const k = copyIndex(w, x, y);
+      kMin = Math.min(kMin, k);
+      kMax = Math.max(kMax, k);
+    }
+    kMin -= 1; kMax += 1;
+  }
+
+  g.save();
+  g.globalAlpha = st.opacity;
+  g.strokeStyle = st.stroke;
+  g.fillStyle = st.stroke;
+  g.lineWidth = st.width;
+  g.lineJoin = 'round';
+  g.lineCap = 'round';
+
+  for (let k = kMin; k <= kMax; k++) {
+    const ox = w ? k * w.tx : 0, oy = w ? k * w.ty : 0;
+    // display -> CSS pixels, y up -> y down
+    const tx = (x: number) => (x + ox - view.centreX) * s + hw;
+    const ty = (y: number) => hh - (y + oy - view.centreY) * s;
+    const x0 = vx0 - ox, x1 = vx1 - ox, y0 = vy0 - oy, y1 = vy1 - oy;
+
+    for (const f of display) {
+      if (f.maxX < x0 || f.minX > x1 || f.maxY < y0 || f.minY > y1) continue;
+      if (f.kind === 'point') {
+        g.beginPath();
+        for (const p of f.paths) {
+          const px = tx(p.xy[0]), py = ty(p.xy[1]);
+          g.moveTo(px + st.radius, py);
+          g.arc(px, py, st.radius, 0, Math.PI * 2);
+        }
+        g.globalAlpha = st.opacity * 0.6;
+        g.fill();
+        g.globalAlpha = st.opacity;
+        g.stroke();
+        continue;
+      }
+      if (f.fill && st.fillOpacity > 0) {
+        g.beginPath();
+        for (const r of f.fill) trace(g, r, tx, ty, true);
+        g.globalAlpha = st.opacity * st.fillOpacity;
+        g.fill('evenodd');
+        g.globalAlpha = st.opacity;
+      }
+      g.beginPath();
+      for (const p of f.paths) trace(g, p.xy, tx, ty, p.closed);
+      g.stroke();
+    }
+  }
+  g.restore();
+}
+
+function insideRings(rings: Float64Array[], x: number, y: number): boolean {
+  let inside = false;
+  for (const r of rings) {
+    for (let i = 0, j = r.length - 2; i < r.length; j = i, i += 2) {
+      const xi = r[i], yi = r[i + 1], xj = r[j], yj = r[j + 1];
+      if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function segDist(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+  const cx = bx - ax, cy = by - ay;
+  const len2 = cx * cx + cy * cy;
+  let t = len2 > 0 ? ((px - ax) * cx + (py - ay) * cy) / len2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (ax + t * cx), py - (ay + t * cy));
 }
 
 function keyOf(ctx: RenderContext): string {
@@ -332,16 +399,28 @@ function assemble(p: Plan, edges: DensifiedPart[], points: DensifiedPart[]): Dis
   return out;
 }
 
-type Opts = { tol: number; maxDepth: number; budget: number };
+type Opts = { tol: number; maxDepth: number; budget?: number };
 
-function buildDisplay(features: Feature[], projector: Projector, opts: Opts): DisplayFeature[] {
+/**
+ * A few features (a sketch, a feature being dragged) for the current view,
+ * synchronously when proj4js runs both CRSs, else null (the caller can
+ * fall back to buildDisplayAsync).
+ */
+export function displayNow(features: Feature[], crs: string, ctx: RenderContext): DisplayFeature[] | null {
+  const scale = Math.pow(2, ctx.view.zoom);
+  const projector = makeProjector(crs, ctx.view.crs, ROUND_TRIP_PX / scale);
+  if (!projector.sync) return null;
+  return buildDisplay(features, projector, { tol: TOL_PX / scale, ...FULL });
+}
+
+export function buildDisplay(features: Feature[], projector: Projector, opts: Opts): DisplayFeature[] {
   const p = plan(features);
   const edges = runSync(densifyParts(p.edgeParts, opts, true), projector.sync!);
   const points = runSync(densifyParts(p.pointParts, opts, false), projector.sync!);
   return assemble(p, edges, points);
 }
 
-async function buildDisplayAsync(features: Feature[], projector: Projector, opts: Opts): Promise<DisplayFeature[]> {
+export async function buildDisplayAsync(features: Feature[], projector: Projector, opts: Opts): Promise<DisplayFeature[]> {
   const p = plan(features);
   const [edges, points] = await Promise.all([
     runAsync(densifyParts(p.edgeParts, opts, true), projector.async),

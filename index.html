@@ -26,6 +26,32 @@
         top: 0;
         pointer-events: none;
       }
+      #edit-hint {
+        position: absolute;
+        left: 50%;
+        bottom: 14px;
+        transform: translateX(-50%);
+        max-width: 80%;
+        padding: 4px 10px;
+        border-radius: 4px;
+        background: rgba(0, 0, 0, 0.7);
+        color: #eee;
+        font: 12px sans-serif;
+        pointer-events: none;
+        z-index: 5;
+      }
+      #controls button.on {
+        background: #3a6ea5;
+        color: #fff;
+      }
+      #controls .prop-row label {
+        width: 80px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #controls .prop-row input[type="text"] {
+        width: 140px;
+      }
       #app.dropping {
         outline: 3px dashed #9cf;
         outline-offset: -3px;
@@ -363,10 +389,40 @@
         </div>
         <div id="layers"></div>
       </fieldset>
+
+      <fieldset>
+        <legend>Edit</legend>
+        <div class="control-row edit-modes">
+          <button data-emode="pan" title="drag to pan (every mode pans with a drag)">pan</button>
+          <button data-emode="select" title="click to select, shift-click to add, drag to move">select</button>
+          <button data-emode="point" title="click to add points">point</button>
+          <button data-emode="line" title="click vertices, double-click or Enter to finish">line</button>
+          <button data-emode="polygon" title="click vertices, double-click or Enter to close">polygon</button>
+          <button data-emode="vertex" title="move, add and remove vertices of the selection">vertices</button>
+        </div>
+        <div class="control-row">
+          <button id="edit-undo" title="Ctrl+Z">undo</button>
+          <button id="edit-redo" title="Ctrl+Y or Ctrl+Shift+Z">redo</button>
+          <button id="edit-delete" title="Delete">delete</button>
+          <button id="edit-copy" title="Ctrl+C: copies keep their CRS">copy</button>
+          <button id="edit-paste" title="Ctrl+V: into the active layer, converted to its CRS">paste</button>
+          <button id="edit-paste-new" title="Ctrl+Shift+V: a new layer in the CRS the features came from">paste as layer</button>
+        </div>
+        <div class="control-row">
+          <input type="checkbox" id="edit-keep-shape" checked />
+          <label for="edit-keep-shape" class="wide" title="on: edges are densified so the pasted shape is the same shape; off: only vertices move, and edges become straight in the target CRS">paste keeps shape</label>
+        </div>
+        <div class="control-row">
+          <input type="text" id="new-layer-crs" class="crs" placeholder="CRS" />
+          <button id="new-layer-btn" title="a temporary layer to draw or paste into">new layer</button>
+        </div>
+        <div id="edit-status" class="hint"></div>
+        <div id="edit-props"></div>
+      </fieldset>
       
       <div id="info"></div>
     </div>
-    <div id="app"></div>
+    <div id="app"><div id="edit-hint" hidden></div></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

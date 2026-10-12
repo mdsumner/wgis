@@ -33,6 +33,38 @@ picked with "open file", or files dropped on the map.
 - Vector layers go in the shareable link (the "link" button) with their
   colour, opacity and fill. Local files cannot.
 
+**Drawing and editing**, in each layer's own CRS (the Edit panel):
+
+- Modes: *select* (click, shift-click to add, drag a selected feature to
+  move it), *point*, *line*, *polygon* (click vertices; double-click or
+  Enter finishes, Backspace takes one back, Esc cancels) and *vertices*
+  (drag a vertex, drag an edge midpoint to add one, Alt-click or Delete
+  to remove one). Panning works in every mode: a drag is a pan, a click is
+  a click.
+- Drawing goes into the *active* layer (the radio button in the layer
+  list), or a new temporary layer if there is none. "new layer" makes an
+  empty temporary layer in any CRS (blank means the map's CRS in a fixed
+  view, lon/lat in a centred one).
+- A click is taken back from the display to lon/lat to the layer CRS, and
+  stored there. Edges are straight in the layer CRS, so a line drawn into
+  an EPSG:3031 layer on a lon/lat map bends as you draw it, and stays the
+  same line when the view changes projection.
+- Undo and redo (Ctrl+Z, Ctrl+Y) for every edit, attributes included.
+  Selected features show their attributes, which can be edited, added and
+  removed.
+- **Copy and paste, after Manifold.** Copied features keep their CRS.
+  Paste (Ctrl+V) puts them into the active layer, converted to its CRS;
+  "paste as layer" (Ctrl+Shift+V) makes a new temporary layer in the CRS
+  they came from. With "paste keeps shape" on (the default) every edge is
+  densified so the pasted shape is the same shape in the new CRS; off,
+  only the vertices move and the edges become straight in the target.
+  Parts with no place in the target (a ring around the pole, pasted into
+  lon/lat) are left out and counted. Copy also puts lon/lat GeoJSON on the
+  system clipboard, and GeoJSON pasted from elsewhere comes in the same way.
+- **Saving**: each layer has ".fgb" (FlatGeobuf in the layer's own CRS)
+  and ".geojson" (lon/lat). Edited layers are marked in the list, and
+  leaving the page with unsaved edits asks first.
+
 The "samples..." menu has one small file per format, each in a different
 CRS, plus two remote files (Natural Earth coastline, FlatGeobuf's test
 countries). Some links:
@@ -53,8 +85,12 @@ workflow in `.github/workflows/pages.yml` deploys `main`.)
 - Vectors are drawn with Canvas 2D. Layers over 5,000 vertices are thinned
   while the view moves and redrawn in full when it settles.
 - GeoParquet geometry must be WKB (not the native GeoArrow encodings).
-- No styling by attribute, no identify, and no editing yet; drawing new
-  features is step 3.
+- No styling by attribute, and no identify beyond selecting.
+- Editing: no snapping, no holes or multi-part drawing (they survive
+  editing when they come from a file), and temporary layers live only in
+  the tab until saved.
+- FlatGeobuf records a CRS only as an EPSG code; saving a layer in any
+  other CRS says so.
 
 ## Run it
 
@@ -63,7 +99,7 @@ workflow in `.github/workflows/pages.yml` deploys `main`.)
 
 ## Checks
 
-    pnpm check-vector   # readers, and densification held to PROJ (wasm)
+    pnpm check-vector   # readers, densification, paste and saves, held to PROJ (wasm)
     pnpm check-warp     # raster warp, from ortho-cog-viewer
     pnpm samples        # regenerate public/samples/
 
@@ -72,7 +108,9 @@ drawn segment with PROJ: back to the layer CRS, half way along, forward
 again, and how far that lands from the chord. Cases include a parallel on
 polar stereographic, a line through the pole drawn in lon/lat, a polygon on
 a globe, a parallel across Robinson's antimeridian, lines past a globe's
-horizon, and a long MGA55 line on a globe.
+horizon, and a long MGA55 line on a globe. Pasted features get the same
+test against the edges they came from, saves are read back, and the
+vertex edits are checked to keep rings closed.
 
 ## Layout
 
@@ -81,5 +119,9 @@ horizon, and a long MGA55 line on a globe.
     src/vector/read.ts       GeoJSON, FlatGeobuf, GeoParquet
     src/vector/densify.ts    straight-in-layer-CRS edges, drawn in the display CRS
     src/vector/project.ts    layer CRS -> display CRS with the validity test
-    src/vector/vectorEngine.ts  layout / refresh / draw on a 2D canvas
+    src/vector/vectorEngine.ts  layout / refresh / draw on a 2D canvas, hit testing
+    src/vector/reproject.ts  features into another CRS, keeping their shape
+    src/vector/write.ts      FlatGeobuf and GeoJSON out
+    src/edit/editor.ts       modes, pointer, undo, copy and paste
+    src/edit/geom.ts         vertex edits on one feature
     src/main.ts              the shell: view, layers, UI, URL state

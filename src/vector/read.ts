@@ -267,6 +267,11 @@ async function finish(p: Parsed, label: string, format: VectorFormat, override: 
   return { crs, crsOrigin, features: p.features, bounds: featureBounds(p.features), label, format };
 }
 
+/** GeoJSON text (pasted, say) as vector data, with the CRS it states or lon/lat. */
+export async function readGeoJSONText(text: string, label: string): Promise<VectorData> {
+  return finish(readGeoJSON(text), label, 'geojson', null);
+}
+
 /** Read a vector file from a URL. */
 export async function readVectorUrl(url: string): Promise<VectorData> {
   const bare = url.split('#')[0];
