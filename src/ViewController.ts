@@ -60,7 +60,14 @@ export class ViewController {
     window.addEventListener('resize', this.onResize);
   }
 
+  /**
+   * Asked first on every mouse down; returning true claims the gesture for
+   * someone else (dragging a vertex), so the view does not pan.
+   */
+  claim: ((e: MouseEvent) => boolean) | null = null;
+
   private onMouseDown = (e: MouseEvent): void => {
+    if (this.claim && this.claim(e)) return;
     this.isDragging = true;
     this.lastX = e.clientX;
     this.lastY = e.clientY;

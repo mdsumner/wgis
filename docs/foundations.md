@@ -244,3 +244,25 @@ What this asks of the 2D design now:
 4. Checks in the style of `tools/`: densification against PROJ on a
    polar and a global case, and a FlatGeobuf round trip that keeps the
    CRS.
+
+## 8. Step 3, as built
+
+Call E as planned, with these choices made on the way:
+
+- Undo keeps whole feature arrays. Features are never changed in place,
+  so an edit is "this layer's array was A, now it is B"; cheap, and it
+  covers attribute edits, deletes and pastes with one mechanism.
+- Copy and paste follow Manifold: a copy carries its CRS, a paste
+  converts into the target layer's CRS, and "paste as layer" keeps the
+  source CRS. Conversion keeps shape by default (densify in the source,
+  judged in the target, the same machinery as display), which is what
+  makes call C hold across layers and not just on screen.
+- Temporary layers are in memory, marked unsaved, with a warning on
+  leaving. OPFS persistence (call G) is still to do.
+- FlatGeobuf is written with explicit columns (the union of every
+  feature's attributes), because the library's serializer takes them from
+  the first feature only.
+- Not yet: snapping, drawing holes and multi-part features, a geodesic
+  edge option, and splitting a pasted ring at a break rather than
+  dropping it (a ring around the pole has a lon/lat form only if the
+  pole is added as an edge).

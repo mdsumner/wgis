@@ -15,6 +15,18 @@
 //    same test proves cuts happened where they should. Each case also states
 //    what should be visible (how many pieces, where they end).
 //
+// 3. Paste: features moved into a layer in another CRS keep their shape,
+//    checked the same way (every pasted edge, straight in the target CRS,
+//    against the source edge it stands for, with PROJ). Rings that have no
+//    place in the target are dropped and counted, not mangled.
+//
+// 4. Saves: FlatGeobuf reads back in the layer's CRS with the same
+//    coordinates and attributes; GeoJSON reads back in lon/lat where PROJ
+//    puts the vertices.
+//
+// 5. Vertex edits: moving, adding and removing vertices keep rings closed
+//    and refuse to make a ring or line too small.
+//
 //   node tools/check-vector.mjs
 import { build } from 'esbuild';
 import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -32,7 +44,10 @@ writeFileSync(entry, [
   "export * from './src/vector/read';",
   "export * from './src/vector/densify';",
   "export * from './src/vector/project';",
-  "export * from './src/core/crs';"
+  "export * from './src/core/crs';",
+  "export * from './src/vector/reproject';",
+  "export * from './src/vector/write';",
+  "export * as geom from './src/edit/geom';"
 ].join('\n') + '\n');
 try {
   await build({ entryPoints: [entry], bundle: true, format: 'cjs', platform: 'node', outfile: bundle, logLevel: 'error' });
@@ -169,20 +184,19 @@ const cases = [
   }
 ];
 
-for (const c of cases) {
-  const projector = wgis.makeProjector(c.layer.wgis, c.display.wgis, c.tol * 4);
-  const parts = c.parts.map((p) => Float64Array.from(p));
-  const result = wgis.runSync(wgis.densifyParts(parts, { tol: c.tol, maxDepth: 12 }, true), projector.sync);
-  const paths = result.flatMap((r) => r.paths);
-
-  // Every drawn segment against PROJ.
+/**
+ * Every segment of paths drawn in `display`, against PROJ: take its ends
+ * back to `layer`, go half way there, and see how far from the segment
+ * PROJ puts that point. Returns the worst distance and the segment count.
+ */
+async function worstDeviation(paths, layer, display) {
   let worst = 0, segs = 0;
   for (const path of paths) {
-    const back = await transform(c.display.proj, c.layer.proj, path.xy);
+    const back = await transform(display.proj, layer.proj, path.xy);
     const n = path.xy.length / 2;
     // PROJ hands longitudes back in -180..180; a path that runs through
     // 180 must be unwrapped before taking midpoints along it.
-    if (c.layer.proj === 'OGC:CRS84') {
+    if (layer.proj === 'OGC:CRS84') {
       for (let i = 1; i < n; i++) {
         while (back[i * 2] - back[i * 2 - 2] > 180) back[i * 2] -= 360;
         while (back[i * 2] - back[i * 2 - 2] < -180) back[i * 2] += 360;
@@ -193,7 +207,15 @@ for (const c of cases) {
       mids[i * 2] = (back[i * 2] + back[i * 2 + 2]) / 2;
       mids[i * 2 + 1] = (back[i * 2 + 1] + back[i * 2 + 3]) / 2;
     }
-    const m = await transform(c.layer.proj, c.display.proj, mids);
+    const m = await transform(layer.proj, display.proj, mids);
+    // and a target in lon/lat has the same seam on the way forward
+    if (display.proj === 'OGC:CRS84') {
+      for (let i = 0; i < n - 1; i++) {
+        const ref = path.xy[i * 2];
+        while (m[i * 2] - ref > 180) m[i * 2] -= 360;
+        while (m[i * 2] - ref < -180) m[i * 2] += 360;
+      }
+    }
     for (let i = 0; i < n - 1; i++) {
       const ax = path.xy[i * 2], ay = path.xy[i * 2 + 1], bx = path.xy[i * 2 + 2], by = path.xy[i * 2 + 3];
       const cx = bx - ax, cy = by - ay, len = Math.hypot(cx, cy);
@@ -206,11 +228,109 @@ for (const c of cases) {
       segs++;
     }
   }
+  return { worst, segs };
+}
+
+for (const c of cases) {
+  const projector = wgis.makeProjector(c.layer.wgis, c.display.wgis, c.tol * 4);
+  const parts = c.parts.map((p) => Float64Array.from(p));
+  const result = wgis.runSync(wgis.densifyParts(parts, { tol: c.tol, maxDepth: 12 }, true), projector.sync);
+  const paths = result.flatMap((r) => r.paths);
+  const { worst, segs } = await worstDeviation(paths, c.layer, c.display);
   const shape = await c.expect(paths);
   const within = worst <= c.tol * 1.5;
   check(within && shape === null,
     `${c.name}: ${paths.length} piece(s), ${segs} segments, worst ${(worst / c.tol).toFixed(2)} x tol` +
     (shape ? `; expected otherwise: ${shape}` : ''));
+}
+
+// --- 3. Paste into another CRS ----------------------------------------------
+
+{
+  const polar = await sample('polar-box-3031.fgb');
+  const [holed, square, diagonal] = polar.features;
+  const MGA55 = { wgis: 'EPSG:28355', proj: 'EPSG:28355' };
+
+  // The 800 km square into lon/lat: one ring, every edge true to the square.
+  const tol = 0.01;
+  const r = await wgis.reprojectFeatures([square], 'EPSG:3031', 'EPSG:4326', { tol });
+  const ring = r.features[0]?.parts[0];
+  const { worst, segs } = ring ? await worstDeviation([{ xy: ring }], POLAR, LONLAT) : { worst: Infinity, segs: 0 };
+  check(r.dropped === 0 && r.features.length === 1 && ring.length / 2 > 20 && worst <= tol * 1.5,
+    `paste the 800 km square (EPSG:3031) into a lon/lat layer: ${ring ? ring.length / 2 : 0} vertices, ${segs} edges, worst ${(worst / tol).toFixed(2)} x tol`);
+
+  // Vertices only: same four corners, nothing added.
+  const v = await wgis.reprojectFeatures([square], 'EPSG:3031', 'EPSG:4326', { keepShape: false });
+  check(v.features[0].parts[0].length === 10, `paste without keeping shape moves only the 5 ring vertices (${v.features[0].parts[0].length / 2})`);
+
+  // The square around the pole has no ring in lon/lat: dropped and counted.
+  const h = await wgis.reprojectFeatures([holed], 'EPSG:3031', 'EPSG:4326', { tol });
+  check(h.features.length === 0 && h.dropped === 1, `a ring around the pole is dropped from a lon/lat paste, not mangled (${h.dropped} dropped)`);
+
+  // The diagonal through the pole into lon/lat: split where longitude jumps.
+  const d = await wgis.reprojectFeatures([diagonal], 'EPSG:3031', 'EPSG:4326', { tol });
+  check(d.features.length === 1 && d.features[0].parts.length === 2, `a line through the pole pastes into lon/lat as two parts (${d.features[0]?.parts.length})`);
+
+  // Into MGA55, and back: the square survives a round trip close to where it was.
+  const m = await wgis.reprojectFeatures([square], 'EPSG:3031', 'EPSG:28355', { tol: 100 });
+  const mw = await worstDeviation([{ xy: m.features[0].parts[0] }], POLAR, MGA55);
+  check(m.dropped === 0 && mw.worst <= 150, `paste the square into an MGA55 layer: worst ${(mw.worst / 100).toFixed(2)} x tol`);
+
+  // Same CRS: copies, never the same arrays.
+  const same = await wgis.reprojectFeatures([square], 'EPSG:3031', 'EPSG:3031');
+  check(same.features[0].parts[0] !== square.parts[0] && same.features[0].parts[0].join() === square.parts[0].join(),
+    'paste into the same CRS copies the coordinates exactly');
+}
+
+// --- 4. Saves ----------------------------------------------------------------
+
+{
+  const polar = await sample('polar-box-3031.fgb');
+  // Mixed attributes, as a layer with drawn and pasted features has.
+  polar.features[1] = { ...polar.features[1], props: {} };
+  polar.features.push(wgis.geom.sketchFeature('point', [100000, 200000], { name: 'drawn', n: 3 }));
+  const { bytes, crsRecorded } = wgis.toFlatGeobuf(polar);
+  const back = await wgis.readVectorFile(new File([bytes], 'saved.fgb'));
+  const sameXY = back.features.length === polar.features.length &&
+    back.features.every((f, i) => f.kind === polar.features[i].kind && f.parts.map((p) => p.join()).join('|') === polar.features[i].parts.map((p) => p.join()).join('|'));
+  check(crsRecorded && back.crs === 'EPSG:3031' && sameXY,
+    `FlatGeobuf save reads back in EPSG:3031 with the same coordinates (${back.features.length} features)`);
+  const names = back.features.map((f) => f.props.name ?? null);
+  check(names[0] === polar.features[0].props.name && names[3] === 'drawn' && Number(back.features[3].props.n) === 3,
+    `FlatGeobuf save keeps mixed attributes (${JSON.stringify(names)}, n=${back.features[3].props.n})`);
+
+  const odd = { ...polar, crs: '+proj=stere +lat_0=-90 +lat_ts=-71 +lon_0=0 +datum=WGS84 +units=m' };
+  check(wgis.toFlatGeobuf(odd).crsRecorded === false, 'FlatGeobuf save says when a CRS cannot be recorded (not an EPSG code)');
+
+  const tas = await sample('tasmania-mga55.geojson');
+  const { text, dropped } = await wgis.toGeoJSONText(tas.features, tas.crs);
+  const gj = await wgis.readGeoJSONText(text, 'saved');
+  const hobart = gj.features[0].parts[0];
+  const want = await transform('EPSG:28355', 'OGC:CRS84', tas.features[0].parts[0]);
+  const err = Math.hypot(hobart[0] - want[0], hobart[1] - want[1]);
+  const line = gj.features[5].parts[0].length / 2;
+  check(dropped === 0 && gj.crs === 'EPSG:4326' && err < 1e-6 && line > 2,
+    `GeoJSON save is lon/lat: Hobart within ${err.toExponential(1)} deg of PROJ, a long MGA55 line has ${line} vertices`);
+}
+
+// --- 5. Vertex edits ----------------------------------------------------------
+
+{
+  const g = wgis.geom;
+  const tri = g.sketchFeature('polygon', [0, 0, 10, 0, 0, 10]);
+  const closed = (f) => { const p = f.parts[0]; return p[0] === p[p.length - 2] && p[1] === p[p.length - 1]; };
+  const m = g.moveVertex(tri, 0, 0, -5, -5);
+  check(closed(m) && m.parts[0][0] === -5 && tri.parts[0][0] === 0, 'moving a ring\'s first vertex moves its closing vertex, and leaves the original alone');
+  const ins = g.insertVertex(tri, 0, 2, -3, 3);
+  check(ins.parts[0].length === 10 && ins.parts[0][6] === -3 && closed(ins), 'adding a vertex on the closing edge keeps the ring closed');
+  check(typeof g.deleteVertex(tri, 0, 1) === 'string', 'a triangle refuses to lose a vertex');
+  const del = g.deleteVertex(ins, 0, 0);
+  check(typeof del === 'object' && del.parts[0].length === 8 && closed(del), 'removing a ring\'s first vertex re-closes it on the next');
+  const line = g.sketchFeature('line', [0, 0, 1, 1]);
+  check(typeof g.deleteVertex(line, 0, 0) === 'string', 'a two-vertex line refuses to lose one');
+  check(g.deleteVertex(g.sketchFeature('point', [1, 2]), 0, 0) === null, 'removing a single point removes the feature');
+  const t = g.translate(tri, 5, 5);
+  check(t.parts[0].join() === '5,5,15,5,5,15,5,5', 'a moved feature moves every vertex by the same amount in its CRS');
 }
 
 await proj.shutdown();

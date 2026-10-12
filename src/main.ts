@@ -40,7 +40,9 @@ import { WarpEngine, WarpOptions } from './engine/warpEngine';
 import { ResampleAlg } from './core/warp';
 import { VectorEngine, VectorStyle, defaultVectorStyle } from './vector/vectorEngine';
 import { readVectorUrl, readVectorFile, vectorFormatOf } from './vector/read';
-import { VectorData } from './vector/types';
+import { Feature, VectorData, featureBounds } from './vector/types';
+import { toFlatGeobuf, toGeoJSONText, download } from './vector/write';
+import { Editor, EditMode } from './edit/editor';
 import proj4 from 'proj4';
 
 registerProjections();
@@ -148,8 +150,16 @@ interface VectorLayer {
   /** Where it came from; null for a local file, which cannot go in a link. */
   url: string | null;
   engine: VectorEngine;
+  /** Made here (drawn or pasted) with no file behind it. */
+  temp: boolean;
+  /** Edited since it was opened or last saved. */
+  modified: boolean;
 }
 let vectorLayers: VectorLayer[] = [];
+/** Where drawing and pasting go (edit/editor.ts). */
+let activeVectorId: number | null = null;
+let editor: Editor;
+let nextTempLayer = 1;
 let overlay: HTMLCanvasElement;
 let overlayCtx: CanvasRenderingContext2D;
 const VECTOR_COLOURS = ['#ffd400', '#00e5ff', '#ff4fd8', '#7cfc00', '#ff8a3d', '#ffffff'];
@@ -612,6 +622,8 @@ function handleViewChangeProj(state: ViewState): void {
 function makeViewController(initial: ViewState): void {
   if (viewController) viewController.destroy();
   viewController = new ViewController(canvas, initial, onViewChange);
+  // The editor gets first say on every press (dragging a vertex is not a pan).
+  if (editor) viewController.claim = editor.claim;
 }
 
 // ---------------------------------------------------------------------------
@@ -880,13 +892,18 @@ async function addVectorLayer(input: string | File, fit = false): Promise<Vector
     alert(`Failed to read vector layer: ${err instanceof Error ? err.message : err}`);
     return null;
   }
+  return pushVectorLayer(data, url, false, fit);
+}
+
+function pushVectorLayer(data: VectorData, url: string | null, temp: boolean, fit: boolean): VectorLayer {
   const colour = VECTOR_COLOURS[vectorLayers.length % VECTOR_COLOURS.length];
-  const v: VectorLayer = { id: nextLayerId++, url, engine: null as unknown as VectorEngine };
+  const v: VectorLayer = { id: nextLayerId++, url, engine: null as unknown as VectorEngine, temp, modified: false };
   v.engine = new VectorEngine(data, vectorStyleFromUrl(url, colour), () => {
     updateUI();
     render(viewController.getState());
   });
   vectorLayers.push(v);
+  if (activeVectorId === null) activeVectorId = v.id;
   if (fit) fitBounds(data.bounds, data.crs);
   const state = viewController.getState();
   v.engine.layout(contextFor(state));
@@ -897,18 +914,37 @@ async function addVectorLayer(input: string | File, fit = false): Promise<Vector
   return v;
 }
 
+/** A layer with no file behind it, for drawing or pasting into; made active. */
+function newTempLayer(crs: string, label: string, features: Feature[]): VectorLayer {
+  const name = `${label} ${nextTempLayer++}`;
+  const data: VectorData = { crs, crsOrigin: 'new layer', features, bounds: featureBounds(features), label: name, format: 'temporary' };
+  const v = pushVectorLayer(data, null, true, false);
+  v.modified = features.length > 0;
+  activeVectorId = v.id;
+  updateUI();
+  return v;
+}
+
 function removeVectorLayer(id: number): void {
   const v = vectorLayers.find(l => l.id === id);
-  if (v) v.engine.dispose();
+  if (!v) return;
+  if (v.modified && !confirm(`${v.engine.data.label} has unsaved edits. Remove it anyway?`)) return;
+  v.engine.dispose();
+  editor.forget(v);
   vectorLayers = vectorLayers.filter(l => l.id !== id);
+  if (activeVectorId === id) activeVectorId = vectorLayers.length ? vectorLayers[vectorLayers.length - 1].id : null;
   updateUI();
   render(viewController.getState());
   scheduleUrlUpdate();
 }
 
 function clearVectorLayers(): void {
-  for (const v of vectorLayers) v.engine.dispose();
+  for (const v of vectorLayers) {
+    v.engine.dispose();
+    editor.forget(v);
+  }
   vectorLayers = [];
+  activeVectorId = null;
 }
 
 function drawVectors(ctx: RenderContext): void {
@@ -917,6 +953,188 @@ function drawVectors(ctx: RenderContext): void {
   overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
   overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   for (const v of vectorLayers) v.engine.draw(overlayCtx, ctx);
+  editor?.draw(overlayCtx, ctx);
+}
+
+/** Save a layer: FlatGeobuf in its own CRS, or GeoJSON in lon/lat. */
+async function saveVectorLayer(id: number, as: 'fgb' | 'geojson'): Promise<void> {
+  const v = vectorLayers.find(l => l.id === id);
+  if (!v) return;
+  const d = v.engine.data;
+  const base = d.label.replace(/\.(geojson|json|fgb|parquet|geoparquet)$/i, '').replace(/[^\w.-]+/g, '_') || 'layer';
+  if (as === 'fgb') {
+    const { bytes, crsRecorded } = toFlatGeobuf(d);
+    download(`${base}.fgb`, bytes, 'application/octet-stream');
+    if (!crsRecorded) {
+      alert(`Saved, but FlatGeobuf records a CRS only as an EPSG code and this layer's CRS is\n${d.crs}\n` +
+        `Open the file with #crs=... on its URL, or save GeoJSON (lon/lat) instead.`);
+    }
+  } else {
+    const { text, dropped } = await toGeoJSONText(d.features, d.crs);
+    download(`${base}.geojson`, text, 'application/geo+json');
+    if (dropped) alert(`${dropped} part(s) have no position in lon/lat and were left out of the GeoJSON.`);
+  }
+  v.modified = false;
+  updateUI();
+}
+
+function anyUnsaved(): boolean {
+  return vectorLayers.some(v => v.modified);
+}
+
+// ---------------------------------------------------------------------------
+// The edit panel
+// ---------------------------------------------------------------------------
+
+let editHintEl: HTMLElement;
+let editStatusEl: HTMLElement;
+let editPropsEl: HTMLElement;
+/** The feature whose attributes the panel shows. */
+let propsShown: Feature | null = null;
+
+/** CRS for a new layer when none is asked for: the map's, if it holds still. */
+function defaultNewLayerCRS(): string {
+  return mode === 'fixed' ? displayCRS : 'EPSG:4326';
+}
+
+function updateEditPanel(): void {
+  if (!editor) return;
+  document.querySelectorAll<HTMLButtonElement>('[data-emode]').forEach((b) => {
+    b.classList.toggle('on', b.dataset.emode === editor.mode);
+  });
+  (document.getElementById('edit-undo') as HTMLButtonElement).disabled = !editor.canUndo();
+  (document.getElementById('edit-redo') as HTMLButtonElement).disabled = !editor.canRedo();
+  const active = vectorLayers.find(l => l.id === activeVectorId);
+  editHintEl.textContent = editor.hint();
+  editHintEl.hidden = editor.mode === 'pan';
+  const into = active ? `${active.engine.data.label} (${active.engine.data.crs})` : 'a new layer';
+  editStatusEl.textContent = editor.message || (editor.mode === 'pan' || editor.mode === 'select' ? '' : `drawing into ${into}`);
+  const sel = editor.selection();
+  if (!sel) { editPropsEl.innerHTML = ''; propsShown = null; return; }
+  const feats = sel.layer.engine.data.features;
+  const head = `${sel.indices.length} selected in ${escapeHtml(sel.layer.engine.data.label)}`;
+  if (sel.indices.length !== 1) { editPropsEl.innerHTML = `<div class="hint">${head}</div>`; propsShown = null; return; }
+  const i = sel.indices[0];
+  const f = feats[i];
+  if (!f) { editPropsEl.innerHTML = ''; return; }
+  // Rebuilding would take the cursor out of a field being typed in.
+  if (f === propsShown) return;
+  propsShown = f;
+  // a ring's closing vertex is not one the user placed
+  const nv = f.parts.reduce((n, p) => n + p.length / 2, 0) - (f.kind === 'polygon' ? f.parts.length : 0);
+  const rows = Object.entries(f.props).map(([k, val]) => `
+      <div class="control-row prop-row">
+        <label title="${escapeHtml(k)}">${escapeHtml(k)}</label>
+        <input type="text" data-prop="${escapeHtml(k)}" value="${escapeHtml(val === null || val === undefined ? '' : String(val))}" />
+        <button data-prop-del="${escapeHtml(k)}" title="remove this attribute">x</button>
+      </div>`).join('');
+  editPropsEl.innerHTML = `
+      <div class="hint">${head}: feature ${i + 1}, ${f.kind}, ${f.parts.length} part${f.parts.length === 1 ? '' : 's'}, ${nv} vertices</div>
+      ${rows}
+      <div class="control-row prop-row">
+        <input type="text" id="prop-new-key" class="small" placeholder="new attribute" />
+        <input type="text" id="prop-new-val" placeholder="value" />
+        <button id="prop-add">add</button>
+      </div>`;
+  editPropsEl.dataset.index = String(i);
+}
+
+/** Attribute text from the panel, as a number when it was one and still reads as one. */
+function propValue(text: string, was: unknown): unknown {
+  if ((typeof was === 'number' || typeof was === 'bigint') && text.trim() !== '' && isFinite(Number(text))) return Number(text);
+  if (typeof was === 'boolean' && (text === 'true' || text === 'false')) return text === 'true';
+  return text;
+}
+
+function wireEditPanel(): void {
+  editHintEl = document.getElementById('edit-hint')!;
+  editStatusEl = document.getElementById('edit-status')!;
+  editPropsEl = document.getElementById('edit-props')!;
+  editor = new Editor({
+    canvas,
+    context: () => contextFor(viewController.getState()),
+    layers: () => vectorLayers,
+    active: () => vectorLayers.find(l => l.id === activeVectorId) ?? null,
+    defaultCRS: defaultNewLayerCRS,
+    newLayer: (crs, label, features) => newTempLayer(crs, label, features),
+    changed: (layer) => {
+      const state = viewController.getState();
+      layer.engine.layout(contextFor(state));
+      render(state);
+      updateUI();
+      scheduleRefresh(state);
+    },
+    render: () => render(viewController.getState()),
+    panel: updateEditPanel
+  });
+  viewController.claim = editor.claim;
+
+  document.querySelectorAll<HTMLButtonElement>('[data-emode]').forEach((b) => {
+    b.addEventListener('click', () => editor.setMode(b.dataset.emode as EditMode));
+  });
+  document.getElementById('edit-undo')!.addEventListener('click', () => editor.undo());
+  document.getElementById('edit-redo')!.addEventListener('click', () => editor.redo());
+  document.getElementById('edit-delete')!.addEventListener('click', () => editor.deleteSelected());
+  document.getElementById('edit-copy')!.addEventListener('click', () => editor.copy());
+  // The buttons paste what wgis copied; with nothing copied they ask the
+  // system clipboard (which may ask the user first). Ctrl+V reads both.
+  const pasteFromButton = async (asNew: boolean) => {
+    let text: string | null = null;
+    if (!editor.hasClip()) {
+      try { text = await navigator.clipboard.readText(); } catch { /* not allowed */ }
+    }
+    await editor.paste(text, asNew);
+  };
+  document.getElementById('edit-paste')!.addEventListener('click', () => pasteFromButton(false));
+  document.getElementById('edit-paste-new')!.addEventListener('click', () => pasteFromButton(true));
+  const keep = document.getElementById('edit-keep-shape') as HTMLInputElement;
+  keep.addEventListener('change', () => { editor.keepShape = keep.checked; });
+  const crsIn = document.getElementById('new-layer-crs') as HTMLInputElement;
+  crsIn.placeholder = `CRS (blank: ${defaultNewLayerCRS()})`;
+  crsIn.addEventListener('focus', () => { crsIn.placeholder = `CRS (blank: ${defaultNewLayerCRS()})`; });
+  document.getElementById('new-layer-btn')!.addEventListener('click', async () => {
+    const crs = crsIn.value.trim() || defaultNewLayerCRS();
+    if (!await resolveCRS(crs)) { alert(unknownCRSMessage(crs)); return; }
+    newTempLayer(crs, 'new layer', []);
+    editor.message = `new layer in ${crs}; pick a drawing mode`;
+    updateEditPanel();
+  });
+
+  editPropsEl.addEventListener('change', (e) => {
+    const t = e.target as HTMLInputElement;
+    const key = t.getAttribute('data-prop');
+    const sel = editor.selection();
+    if (key === null || !sel) return;
+    const i = parseInt(editPropsEl.dataset.index || '-1');
+    const f = sel.layer.engine.data.features[i];
+    if (!f) return;
+    editor.setProps(i, { ...f.props, [key]: propValue(t.value, f.props[key]) });
+  });
+  editPropsEl.addEventListener('click', (e) => {
+    const t = e.target as HTMLElement;
+    const sel = editor.selection();
+    if (!sel) return;
+    const i = parseInt(editPropsEl.dataset.index || '-1');
+    const f = sel.layer.engine.data.features[i];
+    if (!f) return;
+    const del = t.getAttribute('data-prop-del');
+    if (del !== null) {
+      const props = { ...f.props };
+      delete props[del];
+      editor.setProps(i, props);
+    } else if (t.id === 'prop-add') {
+      const k = (document.getElementById('prop-new-key') as HTMLInputElement).value.trim();
+      const val = (document.getElementById('prop-new-val') as HTMLInputElement).value;
+      if (k) editor.setProps(i, { ...f.props, [k]: val });
+    }
+  });
+
+  window.addEventListener('beforeunload', (e) => {
+    if (!anyUnsaved()) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
+  updateEditPanel();
 }
 
 function vectorItemHtml(v: VectorLayer): string {
@@ -925,13 +1143,15 @@ function vectorItemHtml(v: VectorLayer): string {
   const sty = v.engine.getStyle();
   const notes = [st.loading ? 'loading' : '', st.coarse ? 'coarse while moving' : ''].filter(Boolean).join(', ');
   const crs = d.crs.length > 40 ? d.crs.slice(0, 37) + '...' : d.crs;
+  const edited = v.modified ? (v.temp ? ' <b title="not saved anywhere yet">unsaved</b>' : ' <b title="a link still loads the original">edited</b>') : '';
   return `
       <div class="layer-item">
+        <input type="radio" name="vactive" data-vactive="${v.id}"${v.id === activeVectorId ? ' checked' : ''} title="draw and paste into this layer" />
         <button data-vremove="${v.id}" title="Remove layer">x</button>
         <button data-vfit="${v.id}" title="Centre the view on this layer">fit</button>
         <input type="color" class="swatch" data-vcolour="${v.id}" value="${sty.stroke}" title="colour" />
         <span title="${v.url ?? 'local file'}">${escapeHtml(d.label)}</span>
-        <span>(${d.format}, <span title="${escapeHtml(d.crs)}">${escapeHtml(crs)}</span> ${d.crsOrigin === '[assumed]' ? '[assumed]' : ''})</span>
+        <span>(${d.format}, <span title="${escapeHtml(d.crs)}">${escapeHtml(crs)}</span> ${d.crsOrigin === '[assumed]' ? '[assumed]' : ''})${edited}</span>
       </div>
       <div class="alpha-row">
         ${st.features} features, ${st.vertices} vertices; ${st.visible} on the map as ${st.drawnPoints} points${notes ? ` (${notes})` : ''}
@@ -940,6 +1160,8 @@ function vectorItemHtml(v: VectorLayer): string {
         alpha <input type="range" min="0" max="1" step="0.02" value="${sty.opacity}" data-valpha="${v.id}" style="width:60px" />
         fill <input type="range" min="0" max="1" step="0.02" value="${sty.fillOpacity}" data-vfill="${v.id}" style="width:60px" />
         width <input type="text" class="num tiny" value="${sty.width}" data-vwidth="${v.id}" style="width:32px" />
+        save <button data-vsave="${v.id}" data-as="fgb" title="FlatGeobuf in the layer's own CRS">.fgb</button>
+        <button data-vsave="${v.id}" data-as="geojson" title="GeoJSON in lon/lat">.geojson</button>
       </div>`;
 }
 
@@ -1220,6 +1442,7 @@ function updateUI(): void {
     `;
   }).join('') + vectorLayers.map(vectorItemHtml).join('');
   for (const layer of layers) drawHistogram(layer);
+  updateEditPanel();
 }
 
 /**
@@ -1720,6 +1943,7 @@ async function main() {
   regenerateMesh(initial);
   makeViewController(initial);
   syncUI();
+  wireEditPanel();
 
   // Wire up UI
   async function loadOrAdd(url: string, replace: boolean): Promise<void> {
@@ -1727,7 +1951,10 @@ async function main() {
     // Vector data goes over the map: "load" replaces the vector layers and
     // leaves the rasters it would be drawn on.
     if (vectorFormatOf(url)) {
-      if (replace) clearVectorLayers();
+      if (replace) {
+        if (anyUnsaved() && !confirm('Some vector layers have unsaved edits. Replace them anyway?')) return;
+        clearVectorLayers();
+      }
       await addVectorLayer(url);
       return;
     }
@@ -1876,6 +2103,8 @@ async function main() {
     const vrm = t.getAttribute('data-vremove');
     const vfit = t.getAttribute('data-vfit');
     if (vrm !== null) { removeVectorLayer(parseInt(vrm)); return; }
+    const vsave = t.getAttribute('data-vsave');
+    if (vsave !== null) { void saveVectorLayer(parseInt(vsave), t.getAttribute('data-as') === 'geojson' ? 'geojson' : 'fgb'); return; }
     if (vfit !== null) {
       const v = vectorLayers.find(l => l.id === parseInt(vfit));
       if (v) fitBounds(v.engine.data.bounds, v.engine.data.crs);
@@ -1933,6 +2162,12 @@ async function main() {
   layersEl.addEventListener('change', async (e) => {
     const t = e.target as HTMLInputElement | HTMLSelectElement;
     const get = (k: string) => t.getAttribute(k);
+    const va = get('data-vactive');
+    if (va !== null) {
+      activeVectorId = parseInt(va);
+      updateEditPanel();
+      return;
+    }
     const vw = get('data-vwidth');
     if (vw !== null) {
       const w = parseFloat(t.value);
