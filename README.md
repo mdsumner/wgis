@@ -38,6 +38,16 @@ folded into "View settings". Links can start from a choice:
 `?scope=global&lon_0=150`. "Continue where you were" on the start card
 reopens the last view, layers and all (kept in the browser).
 
+**The edge of the map.** Once the view holds still, the raster mesh is
+refined where the regular grid falls short: where the edge of the map
+curves (the limb of a globe, the outline of a world projection) it is
+split down to about 2 pixels and clipped exactly at the edge, where the
+edge is a straight cut (the top of an oblique Mercator) it is clipped
+without splitting, and wherever linear interpolation would put the
+texture more than half a pixel out it is split until it does not. The coarse grid is used while the view moves.
+"refine edges" in the view settings turns this off; `docs/mesh-refinement.md`
+has the measurements.
+
 **Rasters**, from [ortho-cog-viewer](https://github.com/mdsumner/ortho-cog-viewer)
 (copied in at 3e00588): COGs, XYZ and WMTS tile pyramids in any CRS,
 reprojected on the GPU into any display CRS, in a *fixed* view (a static
@@ -135,6 +145,7 @@ when the PR closes.)
 
     pnpm check-vector   # readers, densification, paste and saves, held to PROJ (wasm)
     pnpm check-warp     # raster warp, from ortho-cog-viewer
+    pnpm check-mesh     # the display mesh at the edge of the map, plain grid vs refined
     pnpm samples        # regenerate public/samples/
     node tools/make-coastline.mjs   # regenerate public/base/coastline.fgb
 
@@ -150,6 +161,7 @@ vertex edits are checked to keep rings closed.
 ## Layout
 
     src/core/, src/engine/   from ortho-cog-viewer: CRS, sources, warp, mesh
+    src/engine/refine.ts     adaptive mesh at the limb, outline and poles (docs/mesh-refinement.md)
     src/vector/types.ts      features in their own CRS
     src/vector/read.ts       GeoJSON, FlatGeobuf, GeoParquet
     src/vector/densify.ts    straight-in-layer-CRS edges, drawn in the display CRS

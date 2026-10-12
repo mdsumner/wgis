@@ -52,6 +52,11 @@ export interface RenderContext {
   grid: GridMesh;
   /** Repeat the world along this vector, or null for one copy only. */
   wrap: WrapSpec | null;
+  /**
+   * Once the view settles, refine the grid where it is not good enough
+   * (the edge of the map, poles, strong curvature): engine/refine.ts.
+   */
+  refine?: boolean;
 }
 
 /**

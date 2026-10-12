@@ -11,6 +11,7 @@
 
 import { MeshRenderer } from './MeshRenderer';
 import { buildLayerGeometry, buildLayerGeometryAsync, LayerGeometry } from './uv';
+import { refineSync, refineAsync, RefineOptions } from './refine';
 import { GeoTransform, geoTransform } from '../core/transform';
 import { Executor } from '../core/crs';
 import { LayerEngine, RenderContext, Style, EngineStatus, View } from './types';
@@ -44,6 +45,11 @@ export class MeshEngine implements LayerEngine {
   private layoutInFlight = false;
   private layoutQueued: RenderContext | null = null;
   private disposed = false;
+  /** The view the current coarse geometry was laid out for. */
+  private laidOut = '';
+  /** The view the current refined geometry is for ('' when coarse). */
+  private refined = '';
+  private refineSeq = 0;
 
   constructor(
     gl: WebGL2RenderingContext,
@@ -79,8 +85,18 @@ export class MeshEngine implements LayerEngine {
     return tex >= full * 0.999;
   }
 
+  /** The view, grid and texture a geometry depends on, as a key. */
+  private viewKey(ctx: RenderContext): string {
+    const v = ctx.view, b = this.texBounds;
+    return `${v.crs}|${v.centreX}|${v.centreY}|${v.zoom}|${v.width}x${v.height}|` +
+      `${ctx.grid.cols}x${ctx.grid.rows}|${ctx.grid.bounds.join(',')}|${b.minX},${b.minY},${b.maxX},${b.maxY}|${ctx.wrap ? 'w' : ''}`;
+  }
+
   layout(ctx: RenderContext): void {
     const { view, grid } = ctx;
+    this.laidOut = this.viewKey(ctx);
+    this.refined = '';
+    this.refineSeq++;
     const geo = geoTransform(view.crs);
     this.executor = geo.executor;
     if (geo.executor === 'proj') {
@@ -122,6 +138,8 @@ export class MeshEngine implements LayerEngine {
     buildLayerGeometryAsync(grid.positions, grid.indices, geo, this.source.crs, this.texBounds, cell * 1e-2, wrapU, ctx.wrap)
       .then((geom) => {
         if (this.disposed) return;
+        // a refinement of this view may already have landed
+        if (this.refined && this.refined === this.laidOut) return;
         this.applyGeometry(geom, view, wrapU);
         this.onChange();
       })
@@ -159,7 +177,51 @@ export class MeshEngine implements LayerEngine {
     return this.executor;
   }
 
+  /**
+   * The view has held still: replace the coarse grid with a refined one
+   * (engine/refine.ts), unless the view has moved on since this context.
+   */
+  private settle(ctx: RenderContext): void {
+    if (!ctx.refine || !ctx.grid.cols) return;
+    const key = this.viewKey(ctx);
+    if (key !== this.laidOut || key === this.refined) return;
+    const { view } = ctx;
+    const geo = geoTransform(view.crs);
+    const px = 1 / Math.pow(2, view.zoom);
+    const hw = view.width / 2 * px, hh = view.height / 2 * px;
+    const wrapU = this.textureWrapsU();
+    const cell = Math.abs(ctx.grid.positions[3] - ctx.grid.positions[0]) || 1;
+    const opts: RefineOptions = {
+      sourceCRS: this.source.crs,
+      sourceBounds: this.texBounds,
+      tolerance: cell * 1e-2,
+      wrapU,
+      wrap: ctx.wrap,
+      pxSize: px,
+      maxErrorPx: 0.5,
+      minCellPx: 2,
+      // a little beyond the canvas, so a small pan does not show the edge
+      viewRect: [view.centreX - hw * 1.1, view.centreY - hh * 1.1, view.centreX + hw * 1.1, view.centreY + hh * 1.1]
+    };
+    this.refined = key;
+    if (geo.fromGeoSync && geo.toGeoSync) {
+      const geom = refineSync(ctx.grid, geo, opts);
+      this.applyGeometry(geom, view, wrapU);
+      this.onChange();
+      return;
+    }
+    const seq = ++this.refineSeq;
+    refineAsync(ctx.grid, geo, opts)
+      .then((geom) => {
+        if (this.disposed || seq !== this.refineSeq || this.laidOut !== key) return;
+        this.applyGeometry(geom, view, wrapU);
+        this.onChange();
+      })
+      .catch((err) => console.warn('mesh refinement (PROJ) failed:', err));
+  }
+
   async refresh(ctx: RenderContext): Promise<void> {
+    this.settle(ctx);
     const plan = planFetch(this.source, this.needBBox, this.needPx, MAX_TEXTURE_DIM);
     if (!plan) return;
 
@@ -199,6 +261,7 @@ export class MeshEngine implements LayerEngine {
       }
       this.hasTexture = true;
       this.layout(ctx);   // UVs are relative to the new texture bounds
+      this.settle(ctx);
       this.onChange();
     } catch (err) {
       console.error('Failed to fetch texture:', err);

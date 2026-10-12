@@ -67,6 +67,7 @@ const LAST_VIEW_KEY = 'wgis.lastView';
 let mode: Mode = 'centred';
 let gridSize = 64;
 let showWireframe = false;
+let refineEdges = true;        // refine the mesh at the edge of the map once the view settles
 let wrapWorld = false;         // repeat the world sideways where the projection allows
 // Which engine draws a layer: the mesh (GPU interpolation, free while
 // panning) or a real warp (rwarp in a worker, exact and resampled).
@@ -309,7 +310,7 @@ function currentWrap(): WrapSpec | null {
 }
 
 function contextFor(state: ViewState): RenderContext {
-  return { view: currentView(state), grid: baseMesh, wrap: currentWrap() };
+  return { view: currentView(state), grid: baseMesh, wrap: currentWrap(), refine: refineEdges };
 }
 
 /** Which copies of the world the view currently touches, along the wrap. */
@@ -1715,6 +1716,7 @@ function syncUI(): void {
   centredPanel.hidden = mode !== 'centred';
   gridSizeInput.value = String(gridSize);
   wireframeInput.checked = showWireframe;
+  (document.getElementById('refine') as HTMLInputElement).checked = refineEdges;
   wrapInput.checked = wrapWorld;
   engineSelect.value = engineKind;
   warpAlgSelect.value = warpAlg;
@@ -1746,6 +1748,9 @@ function applyUrlParams(params: URLSearchParams): void {
 
   const g = parseInt(params.get('grid') || '');
   if (!isNaN(g) && g >= 4) gridSize = g;
+
+  const rf = params.get('refine');
+  if (rf !== null) refineEdges = !(rf === '0' || rf === 'false');
 
   const w = params.get('wire');
   if (w !== null) showWireframe = w === '1' || w === 'true';
@@ -1831,6 +1836,7 @@ function viewUrl(withLayers: boolean): string {
   p.set('zoom', state.zoom.toFixed(3));
   if (gridSize !== 64) p.set('grid', String(gridSize));
   if (showWireframe) p.set('wire', '1');
+  if (!refineEdges) p.set('refine', '0');
   if (!showGraticule) p.set('grat', '0');
   if (wrapWorld) p.set('wrap', '1');
   if (recentreMode !== 'auto') p.set('recentre', recentreMode);
@@ -2563,6 +2569,15 @@ async function main() {
     showGraticule = graticuleInput.checked;
     graticuleCRS = '';
     render(viewController.getState());
+    scheduleUrlUpdate();
+  });
+  const refineInput = document.getElementById('refine') as HTMLInputElement;
+  refineInput.addEventListener('change', () => {
+    refineEdges = refineInput.checked;
+    layoutAllLayers();
+    const state = viewController.getState();
+    render(state);
+    scheduleRefresh(state);
     scheduleUrlUpdate();
   });
   wireframeInput.addEventListener('change', () => {
