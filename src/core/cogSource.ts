@@ -368,6 +368,12 @@ export class COGSource implements RasterSource {
     }
 
     console.log(`COG fetch level ${level} window [${x0},${y0},${x1},${y1}] -> ${outW}x${outH}`);
+    // YCbCr (GDAL's default for JPEG-in-TIFF) has to be converted, which
+    // readRGB does; read as plain samples it shows as false colour.
+    if (image.fileDirectory.PhotometricInterpretation === 6) {
+      const rgb = await image.readRGB(opts as any);
+      return { rgba: toRGBA(rgb as unknown as ArrayLike<number>, outW, outH, 3), bounds };
+    }
     const rasters = await image.readRasters(opts as any);
     const data = rasters as unknown as ArrayLike<number>;
     const rgba = toRGBA(data, outW, outH, image.getSamplesPerPixel());
