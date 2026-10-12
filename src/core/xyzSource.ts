@@ -57,15 +57,15 @@ export interface TilePreset {
 
 export const TILE_PRESETS: Record<string, TilePreset> = {
   'gebco-2024': {
-    label: 'GEBCO 2024 bathymetry, hillshaded (COG, source.coop)',
-    template: 'https://data.source.coop/alexgleith/gebco-2024/GEBCO_2024.tif#cmap=bathy&curve=sqrt&shade=0.7&zf=8',
-    attribution: 'GEBCO Compilation Group (2024); COG by Alex Leith on source.coop',
+    label: 'GEBCO 2026 bathymetry, hillshaded (COG, source.coop)',
+    template: 'https://data.source.coop/ausantarctic/gebco/GEBCO_2026.tif#cmap=bathy&curve=sqrt&shade=0.7&zf=8',
+    attribution: 'GEBCO Compilation Group (2026); COG on source.coop (ausantarctic)',
     cog: true
   },
   'gebco-2024-dirt': {
-    label: 'GEBCO 2024 with the DiRT palette (COG, source.coop)',
-    template: 'https://data.source.coop/alexgleith/gebco-2024/GEBCO_2024.tif#cmap=dirt&shade=0.6&zf=8',
-    attribution: 'GEBCO Compilation Group (2024); COG by Alex Leith on source.coop',
+    label: 'GEBCO 2026 with the DiRT palette (COG, source.coop)',
+    template: 'https://data.source.coop/ausantarctic/gebco/GEBCO_2026.tif#cmap=dirt&shade=0.6&zf=8',
+    attribution: 'GEBCO Compilation Group (2026); COG on source.coop (ausantarctic)',
     cog: true
   },
   'ibcso-chart': {
