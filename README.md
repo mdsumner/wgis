@@ -8,6 +8,36 @@ Design notes are in `docs/` (start with `docs/foundations.md`).
 
 ## What works now
 
+**Starting.** With no link parameters the page opens on a slowly turning
+globe and asks how much of the Earth you are working with:
+
+- *Global*: Equal Earth, centred on the longitude the globe is facing;
+  dragging turns it.
+- *Hemispheric*: the globe at the North pole, the South pole or the side
+  it is facing.
+- *Local*: the UTM zone of a place, in the regional datum where one
+  applies (GDA2020 MGA in Australia, ETRS89 in Europe, NAD83 in North
+  America, WGS 84 elsewhere, UPS near the poles), 50 km across. The place
+  is typed (a name or address, looked up with OpenStreetMap Nominatim; or
+  lon lat, lat lon, DMS, or easting northing with a zone, read the way
+  [lunamap](https://github.com/mdsumner/lunamap) reads them), clicked on
+  the globe, or the device's location, with the typed box as the fallback
+  when location is unavailable.
+- *Open data*: a URL or a file; the map opens in that layer's own CRS
+  and extent.
+
+Each choice sets a background: Esri imagery, or GEBCO bathymetry near
+the poles (Web Mercator tiles stop at 85 degrees). A Natural Earth 1:50m
+coastline (`public/base/coastline.fgb`, 1 MB) draws under every view, so
+the map is never blank. The top bar shows the scope, the CRS and the
+background; clicking the scope chooses again, the CRS opens the view
+settings, and zooming far in on a globe or far out of a local view offers
+the switch ("Work locally in MGA 55?"). The engine and mesh controls are
+folded into "View settings". Links can start from a choice:
+`?scope=local&at=147.33,-42.88`, `?scope=hemi&at=0,-90`,
+`?scope=global&lon_0=150`. "Continue where you were" on the start card
+reopens the last view, layers and all (kept in the browser).
+
 **Rasters**, from [ortho-cog-viewer](https://github.com/mdsumner/ortho-cog-viewer)
 (copied in at 3e00588): COGs, XYZ and WMTS tile pyramids in any CRS,
 reprojected on the GPU into any display CRS, in a *fixed* view (a static
@@ -102,6 +132,7 @@ workflow in `.github/workflows/pages.yml` deploys `main`.)
     pnpm check-vector   # readers, densification, paste and saves, held to PROJ (wasm)
     pnpm check-warp     # raster warp, from ortho-cog-viewer
     pnpm samples        # regenerate public/samples/
+    node tools/make-coastline.mjs   # regenerate public/base/coastline.fgb
 
 `check-vector` densifies lines with wgis (proj4js) and then checks every
 drawn segment with PROJ: back to the layer CRS, half way along, forward
@@ -124,4 +155,6 @@ vertex edits are checked to keep rings closed.
     src/vector/write.ts      FlatGeobuf and GeoJSON out
     src/edit/editor.ts       modes, pointer, undo, copy and paste
     src/edit/geom.ts         vertex edits on one feature
-    src/main.ts              the shell: view, layers, UI, URL state
+    src/start/scopes.ts      global / hemispheric / local / data: CRS and background defaults
+    src/start/locate.ts      typed places and coordinates, device location
+    src/main.ts              the shell: view, layers, UI, URL state, start card

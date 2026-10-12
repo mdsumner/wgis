@@ -112,6 +112,12 @@ export const TILE_PRESETS: Record<string, TilePreset> = {
     scheme: 'GIBS4326_250m',
     attribution: 'NASA GIBS'
   },
+  'bluemarble-2004': {
+    label: 'NASA Blue Marble January 2004 (GeoTIFF, not a COG)',
+    template: 'https://assets.science.nasa.gov/content/dam/science/esd/eo/images/bmng/bmng-base/january/world.200401.3x5400x2700_geo.tif',
+    attribution: 'NASA Earth Observatory, Blue Marble Next Generation',
+    cog: true
+  },
   'gibs-seaice-3857': {
     label: 'GIBS AMSR2 sea ice concentration 2024-12-04 (EPSG:3857)',
     template: 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/AMSRU2_Sea_Ice_Concentration_12km/default/2024-12-04/GoogleMapsCompatible_Level6/{z}/{y}/{x}.png',

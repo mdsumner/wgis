@@ -43,6 +43,8 @@ import { readVectorUrl, readVectorFile, vectorFormatOf } from './vector/read';
 import { Feature, VectorData, featureBounds } from './vector/types';
 import { toFlatGeobuf, toGeoJSONText, download } from './vector/write';
 import { Editor, EditMode } from './edit/editor';
+import { Scope, SCOPE_LABELS, BACKGROUNDS, backgroundKeyOf, backgroundFor, localCRS, LOCAL_MESH_HALF, LOCAL_VIEW_HALF, scopeOfLonLat, paddedExtent } from './start/scopes';
+import { Place, parseCoordinate, searchPlaces, deviceLocation } from './start/locate';
 import proj4 from 'proj4';
 
 registerProjections();
@@ -53,7 +55,10 @@ type Mode = 'fixed' | 'centred';
 
 const DEFAULT_EXTENT = Math.PI * 6378137 * 2;  // ~40M meters
 const MAX_VERTICES = 66000;  // ~256x256 grid max
-const DEFAULT_COG = 'https://assets.science.nasa.gov/content/dam/science/esd/eo/images/bmng/bmng-base/january/world.200401.3x5400x2700_geo.tif';
+/** The coastline every view starts with (tools/make-coastline.mjs). */
+const COASTLINE_URL = './base/coastline.fgb';
+/** Where "Continue where you were" keeps the last view, layers and all. */
+const LAST_VIEW_KEY = 'wgis.lastView';
 
 // ---------------------------------------------------------------------------
 // Display state
@@ -170,6 +175,15 @@ const VECTOR_SAMPLES: Record<string, { label: string; url: string }> = {
   'coast': { label: 'Natural Earth 110m coastline (GeoJSON, remote)', url: 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_coastline.geojson' },
   'countries': { label: 'FlatGeobuf test countries (remote)', url: 'https://raw.githubusercontent.com/flatgeobuf/flatgeobuf/master/test/data/countries.fgb' }
 };
+// The start card and the top bar (start/scopes.ts).
+let scope: Scope | null = null;
+/** The raster layer the background chip controls, if any. */
+let backgroundId: number | null = null;
+/** The start card is up: the address bar is left alone until a choice. */
+let startOpen = false;
+/** The bundled coastline: drawn under the vector layers, never edited. */
+let coastline: VectorEngine | null = null;
+let showCoastline = true;
 let baseMesh: GridMesh;
 let gl: WebGL2RenderingContext;
 let viewController: ViewController;
@@ -467,6 +481,13 @@ function layoutAllLayers(): void {
       v.engine.layout(ctx);
     } catch (err) {
       console.error(`Failed to lay out vector layer ${v.id}:`, err);
+    }
+  }
+  if (coastline && showCoastline) {
+    try {
+      coastline.layout(ctx);
+    } catch (err) {
+      console.error('Failed to lay out the coastline:', err);
     }
   }
 }
@@ -773,7 +794,7 @@ async function openSource(url: string): Promise<RasterSource> {
   return COGSource.open(url);
 }
 
-async function addLayer(url: string): Promise<Layer | null> {
+async function addLayer(url: string, quiet = false): Promise<Layer | null> {
   console.log('Adding layer:', url);
   try {
     const source = await openSource(url);
@@ -827,7 +848,7 @@ async function addLayer(url: string): Promise<Layer | null> {
     return layer;
   } catch (err) {
     console.error('Failed to add layer:', err);
-    alert(`Failed to load source: ${err}`);
+    if (!quiet) alert(`Failed to load source: ${err}`);
     return null;
   }
 }
@@ -836,14 +857,20 @@ function removeLayer(id: number): void {
   const layer = layers.find(l => l.id === id);
   if (layer) layer.engine.dispose();
   layers = layers.filter(l => l.id !== id);
+  if (backgroundId === id) backgroundId = null;
   updateUI();
   render(viewController.getState());
   scheduleUrlUpdate();
 }
 
-function clearLayers(): void {
-  for (const l of layers) l.engine.dispose();
-  layers = [];
+/** Remove the raster layers; the background stays unless asked. */
+function clearLayers(keepBackground = true): void {
+  for (const l of layers) {
+    if (keepBackground && l.id === backgroundId) continue;
+    l.engine.dispose();
+  }
+  layers = layers.filter(l => keepBackground && l.id === backgroundId);
+  if (!layers.length) backgroundId = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -952,6 +979,7 @@ function drawVectors(ctx: RenderContext): void {
   overlayCtx.setTransform(1, 0, 0, 1, 0, 0);
   overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
   overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (coastline && showCoastline) coastline.draw(overlayCtx, ctx);
   for (const v of vectorLayers) v.engine.draw(overlayCtx, ctx);
   editor?.draw(overlayCtx, ctx);
 }
@@ -1190,6 +1218,9 @@ function scheduleRefresh(state: ViewState): void {
     vectorLayers.forEach(v => v.engine.refresh(ctx).then((changed) => {
       if (changed) { render(viewController.getState()); updateUI(); }
     }));
+    if (coastline && showCoastline) void coastline.refresh(ctx).then((changed) => {
+      if (changed) render(viewController.getState());
+    });
     updateTimeout = null;
   }, 150);
 }
@@ -1340,6 +1371,7 @@ function updateInfo(state: ViewState): void {
   }
   lines.push(`Layers: ${layers.length} raster, ${vectorLayers.length} vector`);
   infoEl.innerHTML = lines.join('<br>');
+  updateTopbar(state);
 }
 
 function formatUnits(v: number, unit: string): string {
@@ -1689,6 +1721,7 @@ function syncUI(): void {
   warpScaleInput.value = String(warpScale);
   recentreSelect.value = recentreMode;
   graticuleInput.checked = showGraticule;
+  if (coastlineInput) coastlineInput.checked = showCoastline;
   displayCrsInput.value = displayCRS;
   extentInput.value = [meshExtent.minX, meshExtent.maxX, meshExtent.minY, meshExtent.maxY].join(',');
   if (isPresetName(centredProj)) {
@@ -1731,6 +1764,11 @@ function applyUrlParams(params: URLSearchParams): void {
   if (isFinite(ws) && ws > 0) warpScale = ws;
   const me = parseFloat(params.get('maxerr') || '');
   if (isFinite(me) && me >= 0) warpMaxError = me;
+
+  const sc = params.get('scope');
+  if (sc === 'global' || sc === 'hemi' || sc === 'local' || sc === 'data') scope = sc;
+  const co = params.get('coast');
+  if (co !== null) showCoastline = !(co === '0' || co === 'false');
 
   const rc = params.get('recentre');
   if (rc === 'live' || rc === 'release' || rc === 'auto') recentreMode = rc;
@@ -1800,6 +1838,8 @@ function viewUrl(withLayers: boolean): string {
   if (warpAlg !== 'bilinear') p.set('alg', warpAlg);
   if (warpScale !== 1) p.set('warpscale', String(warpScale));
   if (warpMaxError !== 0.125) p.set('maxerr', String(warpMaxError));
+  if (scope) p.set('scope', scope);
+  if (!showCoastline) p.set('coast', '0');
   if (withLayers) {
     for (const l of layers) p.append('url', layerUrlWithState(l));
     for (const v of vectorLayers) {
@@ -1811,7 +1851,15 @@ function viewUrl(withLayers: boolean): string {
 }
 
 function writeUrl(): void {
+  // While the start card is up the page is still "no parameters": a
+  // reload comes back to the card, not to the spinning globe.
+  if (startOpen) return;
   history.replaceState(null, '', viewUrl(false));
+  try {
+    localStorage.setItem(LAST_VIEW_KEY, viewUrl(true));
+  } catch {
+    // no storage: "Continue where you were" just does not appear
+  }
 }
 
 /** A shareable link: the view plus every layer, in the address bar and copied. */
@@ -1831,6 +1879,482 @@ function shareLink(): void {
 /** Back to the defaults: the page with no parameters at all. */
 function resetAll(): void {
   location.href = location.pathname;
+}
+
+// ---------------------------------------------------------------------------
+// The start card, scopes and the top bar (start/scopes.ts)
+// ---------------------------------------------------------------------------
+
+let startCard: HTMLElement;
+let startHint: HTMLElement;
+let startMsg: HTMLElement;
+let startPlaces: HTMLElement;
+let scopeChip: HTMLButtonElement;
+let crsChip: HTMLButtonElement;
+let bgChip: HTMLSelectElement;
+let switchChip: HTMLButtonElement;
+let coastlineInput: HTMLInputElement;
+/** The key of the background layer (BACKGROUNDS), or 'none'. */
+let backgroundKey = 'none';
+let backgroundToken = 0;
+/** "Pick on the globe": the next click on the map is the place. */
+let picking = false;
+let switchAction: (() => void) | null = null;
+
+/** Switch to a centred view. False (and nothing changed) if the CRS cannot be resolved. */
+async function setCentredView(proj: string, lon: number, lat: number, zoom: number): Promise<boolean> {
+  const crs = centredCRS(resolveTemplate(proj), lon, lat);
+  if (!await resolveCRS(crs)) {
+    alert(unknownCRSMessage(crs));
+    return false;
+  }
+  mode = 'centred';
+  centredProj = proj;
+  [centreLon, centreLat] = normaliseLonLat(lon, lat);
+  lookOffsetX = 0;
+  lookOffsetY = 0;
+  foldOnRelease = false;
+  meshZoom = NaN;   // the mesh may be a fixed-mode one: rebuild it
+  updateCentredOrigin();
+  makeViewController({ centerX: 0, centerY: 0, zoom });
+  syncUI();
+  return true;
+}
+
+/**
+ * Switch to a fixed view in a CRS, with this mesh extent, showing `fit`
+ * (or centred on it at `zoom`). False if the CRS cannot be resolved.
+ */
+async function setFixedView(crs: string, extent: SourceBounds, fit: SourceBounds, zoom?: number): Promise<boolean> {
+  if (!await resolveCRS(crs)) {
+    alert(unknownCRSMessage(crs));
+    return false;
+  }
+  mode = 'fixed';
+  displayCRS = crs;
+  meshExtent = { minX: extent.minX, minY: extent.minY, maxX: extent.maxX, maxY: extent.maxY };
+  lookOffsetX = 0;
+  lookOffsetY = 0;
+  updateCentredOrigin();
+  regenerateMesh();
+  const w = Math.max(fit.maxX - fit.minX, 1e-9), h = Math.max(fit.maxY - fit.minY, 1e-9);
+  const z = zoom ?? Math.log2(Math.min(canvas.clientWidth / w, canvas.clientHeight / h) / 1.1);
+  makeViewController({ centerX: (fit.minX + fit.maxX) / 2, centerY: (fit.minY + fit.maxY) / 2, zoom: z });
+  layoutAllLayers();
+  syncUI();
+  return true;
+}
+
+/** Equal Earth, the whole world in the canvas. */
+function worldZoom(): number {
+  const w = canvas.clientWidth || 800, h = canvas.clientHeight || 600;
+  return Math.log2(Math.min(w / 34.5e6, h / 16.8e6) / 1.08);
+}
+
+/** Replace the background layer (always the bottom raster); 'none' removes it. */
+async function setBackground(key: string): Promise<void> {
+  const token = ++backgroundToken;
+  const old = layers.find(l => l.id === backgroundId);
+  if (old) {
+    old.engine.dispose();
+    layers = layers.filter(l => l !== old);
+  }
+  backgroundId = null;
+  backgroundKey = 'none';
+  const b = BACKGROUNDS[key];
+  bgChip.title = 'Background';
+  if (b) {
+    // A background that cannot be reached is not worth a dialog: the
+    // coastline is there anyway, and the chip says what happened.
+    const layer = await addLayer(b.url, true);
+    if (!layer && token === backgroundToken) bgChip.title = `${b.label} could not be loaded`;
+    if (layer && token !== backgroundToken) {
+      // a later choice overtook this one
+      removeLayer(layer.id);
+      return;
+    }
+    if (layer) {
+      layers = [layer, ...layers.filter(l => l !== layer)];
+      backgroundId = layer.id;
+      backgroundKey = key;
+    }
+  }
+  bgChip.value = backgroundKey;
+  updateUI();
+  render(viewController.getState());
+  scheduleUrlUpdate();
+}
+
+async function ensureBackground(key: string): Promise<void> {
+  if (key !== backgroundKey) await setBackground(key);
+}
+
+async function loadCoastline(): Promise<void> {
+  try {
+    const data = await readVectorUrl(COASTLINE_URL);
+    const style = { ...defaultVectorStyle('#e6e6e6'), width: 0.8, opacity: 0.75, fillOpacity: 0 };
+    coastline = new VectorEngine(data, style, () => render(viewController.getState()));
+    const state = viewController.getState();
+    if (showCoastline) coastline.layout(contextFor(state));
+    render(state);
+    scheduleRefresh(state);
+  } catch (err) {
+    console.warn('Coastline not loaded:', err);
+  }
+}
+
+// The globe turns slowly behind the start card until anyone touches it.
+const SPIN_DEG_PER_S = 6;
+let spinning = false;
+let spinLast = 0;
+let spinRefreshLast = 0;
+
+function startSpin(): void {
+  if (spinning || mode !== 'centred') return;
+  spinning = true;
+  spinLast = performance.now();
+  requestAnimationFrame(spinStep);
+}
+
+function stopSpin(): void {
+  spinning = false;
+}
+
+function spinStep(t: number): void {
+  if (!spinning || mode !== 'centred') {
+    spinning = false;
+    return;
+  }
+  const dt = Math.min(0.1, (t - spinLast) / 1000);
+  spinLast = t;
+  [centreLon, centreLat] = normaliseLonLat(centreLon + SPIN_DEG_PER_S * dt, centreLat);
+  updateCentredOrigin();
+  syncCentreInputs();
+  layoutAllLayers();
+  const state = viewController.getState();
+  render(state);
+  // scheduleRefresh is a debounce, which a steady spin would starve.
+  if (t - spinRefreshLast > 400) {
+    spinRefreshLast = t;
+    scheduleRefresh(state);
+  }
+  requestAnimationFrame(spinStep);
+}
+
+function showStart(atBoot: boolean): void {
+  startOpen = atBoot;
+  picking = false;
+  startHint.hidden = true;
+  startCard.hidden = false;
+  document.body.classList.add('starting');
+  let last: string | null = null;
+  try {
+    last = localStorage.getItem(LAST_VIEW_KEY);
+  } catch {
+    last = null;
+  }
+  const cont = document.getElementById('start-continue') as HTMLAnchorElement;
+  cont.hidden = !atBoot || !last;
+  if (last) cont.onclick = () => { location.href = last!; };
+  (document.getElementById('start-close') as HTMLElement).hidden = atBoot;
+}
+
+function hideStart(): void {
+  startOpen = false;
+  picking = false;
+  stopSpin();
+  startCard.hidden = true;
+  startHint.hidden = true;
+  startMsg.textContent = '';
+  startPlaces.innerHTML = '';
+  document.body.classList.remove('starting');
+}
+
+async function chooseGlobal(lon = centreLon): Promise<void> {
+  hideStart();
+  scope = 'global';
+  if (await setCentredView('eqearth', lon, 0, worldZoom())) await ensureBackground(backgroundFor(0));
+}
+
+async function chooseHemi(lat = centreLat, lon = centreLon): Promise<void> {
+  hideStart();
+  scope = 'hemi';
+  if (await setCentredView('ortho', lon, lat, defaultCentredZoom())) await ensureBackground(backgroundFor(lat));
+}
+
+/** Local: the UTM zone of the place, a mesh 1000 km across, a view 50 km across (or at `zoom`). */
+async function chooseLocal(p: Place, zoom?: number): Promise<void> {
+  const lc = localCRS(p.lon, p.lat);
+  if (!await resolveCRS(lc.code)) {
+    startMsg.textContent = unknownCRSMessage(lc.code);
+    return;
+  }
+  const xy = await geoTransform(lc.code).fromGeo(new Float64Array([p.lon, p.lat]));
+  const x = xy[0], y = xy[1];
+  if (!isFinite(x) || !isFinite(y)) {
+    startMsg.textContent = `${lc.label} has no position for ${p.label}`;
+    return;
+  }
+  hideStart();
+  scope = 'local';
+  const box = (r: number) => ({ minX: x - r, maxX: x + r, minY: y - r, maxY: y + r });
+  if (await setFixedView(lc.code, box(LOCAL_MESH_HALF), box(LOCAL_VIEW_HALF), zoom)) {
+    console.log(`Local: ${lc.label} (${lc.code}) at ${p.label}`);
+    await ensureBackground(backgroundFor(p.lat));
+  }
+}
+
+/** Open data: the map goes to the layer's own CRS and extent. */
+async function chooseData(input: string | File): Promise<void> {
+  if (typeof input === 'string' && !vectorFormatOf(input)) {
+    hideStart();
+    scope = 'data';
+    const layer = await addLayer(input);
+    if (!layer) return;
+    await viewInCRS(layer.source.crs, layer.source.bounds);
+    return;
+  }
+  let data: VectorData;
+  try {
+    data = typeof input === 'string' ? await readVectorUrl(input) : await readVectorFile(input);
+  } catch (err) {
+    startMsg.textContent = `Could not read that layer: ${err instanceof Error ? err.message : err}`;
+    return;
+  }
+  hideStart();
+  scope = 'data';
+  if (await viewInCRS(data.crs, data.bounds)) pushVectorLayer(data, typeof input === 'string' ? input : null, false, false);
+}
+
+async function viewInCRS(crs: string, b: SourceBounds): Promise<boolean> {
+  if (![b.minX, b.minY, b.maxX, b.maxY].every(isFinite)) return false;
+  if (!await setFixedView(crs, paddedExtent(b, crs), b)) return false;
+  let key = 'esri';
+  try {
+    if (geoTransform(crs).toGeoSync) {
+      // Data around a pole (in one hemisphere, reaching 80 degrees) gets
+      // the polar background, however many longitudes it spans.
+      const ll = transformBounds(b, crs, 'EPSG:4326', 30);
+      if (ll.minY <= -80 && ll.maxY < 0) key = backgroundFor(-90);
+      else if (ll.maxY >= 80 && ll.minY > 0) key = backgroundFor(90);
+      else if (scopeOfLonLat(ll) !== 'global') key = backgroundFor((ll.minY + ll.maxY) / 2);
+    }
+  } catch {
+    // no lon/lat bounds: the default background
+  }
+  await ensureBackground(key);
+  return true;
+}
+
+/** Find a typed place: a coordinate if it reads as one, otherwise a place search. */
+async function findPlace(text: string): Promise<void> {
+  const q = text.trim();
+  startPlaces.innerHTML = '';
+  startMsg.textContent = '';
+  if (!q) return;
+  const c = parseCoordinate(q, centreLon, centreLat);
+  if (c) {
+    await chooseLocal(c);
+    return;
+  }
+  if (!/[A-Za-z]{2,}/.test(q)) {
+    startMsg.textContent = 'Could not read that as a place or a coordinate.';
+    return;
+  }
+  startMsg.textContent = 'Searching...';
+  let found: Place[];
+  try {
+    found = await searchPlaces(q);
+  } catch (err) {
+    startMsg.textContent = `Place search failed (${err instanceof Error ? err.message : err}); coordinates still work.`;
+    return;
+  }
+  if (!found.length) {
+    startMsg.textContent = 'No place found by that name.';
+    return;
+  }
+  if (found.length === 1) {
+    await chooseLocal(found[0]);
+    return;
+  }
+  startMsg.textContent = '';
+  for (const p of found) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = p.label;
+    b.addEventListener('click', () => void chooseLocal(p));
+    startPlaces.appendChild(b);
+  }
+}
+
+/** Lon/lat under a screen point (CSS pixels), or null off the map. */
+async function lonLatAt(sx: number, sy: number): Promise<Place | null> {
+  const v = currentView(viewController.getState());
+  const s = Math.pow(2, v.zoom);
+  const x = v.centreX + (sx - v.width / 2) / s;
+  const y = v.centreY - (sy - v.height / 2) / s;
+  const r = await geoTransform(v.crs).toGeo(new Float64Array([x, y]));
+  if (!isFinite(r[0]) || !isFinite(r[1])) return null;
+  return { lon: r[0], lat: r[1], label: `${r[0].toFixed(4)}, ${r[1].toFixed(4)}` };
+}
+
+function startPicking(): void {
+  stopSpin();
+  startCard.hidden = true;
+  picking = true;
+  startHint.textContent = 'Click a place on the globe (drag to turn it, Esc to go back)';
+  startHint.hidden = false;
+}
+
+/** The short name of the map's CRS, for the top bar. */
+function crsShortName(): string {
+  if (mode === 'centred') {
+    return isPresetName(centredProj) ? CENTRED_PRESETS[centredProj].label.replace(/^World: /, '') : 'custom projection';
+  }
+  const m = displayCRS.match(/^EPSG:(\d+)$/i);
+  if (m) {
+    const c = +m[1];
+    if (c >= 7846 && c <= 7859) return `MGA ${c - 7800}`;
+    if (c >= 25828 && c <= 25838) return `ETRS89 UTM ${c - 25800}N`;
+    if (c >= 26901 && c <= 26923) return `NAD83 UTM ${c - 26900}N`;
+    if (c >= 32601 && c <= 32660) return `UTM ${c - 32600}N`;
+    if (c >= 32701 && c <= 32760) return `UTM ${c - 32700}S`;
+    if (c === 32661) return 'UPS North';
+    if (c === 32761) return 'UPS South';
+  }
+  return displayCRS.length > 28 ? `${displayCRS.slice(0, 26)}...` : displayCRS;
+}
+
+function setText(el: HTMLElement, text: string): void {
+  if (el.textContent !== text) el.textContent = text;
+}
+
+/**
+ * The top bar follows the view: scope and CRS names, and an offer to move
+ * between scopes when the zoom has left the current one behind.
+ */
+function updateTopbar(state: ViewState): void {
+  if (!scopeChip) return;
+  setText(scopeChip, scope ? SCOPE_LABELS[scope] : 'Choose scope');
+  setText(crsChip, crsShortName());
+  crsChip.title = `${currentDisplayCRS()}\n(open the view settings)`;
+  const mpp = 1 / Math.pow(2, state.zoom);
+  let offer = '';
+  switchAction = null;
+  if (mode === 'centred' && mpp < 150 && !spinning) {
+    const lon = centreLon, lat = centreLat;
+    offer = `Work locally in ${localCRS(lon, lat).label}?`;
+    switchAction = () => void chooseLocal({ lon, lat, label: 'the view centre' }, state.zoom);
+  } else if (mode === 'fixed' && scope === 'local' && mpp > 1500) {
+    const geo = geoTransform(displayCRS);
+    if (geo.toGeoSync) {
+      const ll = geo.toGeoSync(new Float64Array([state.centerX, state.centerY]));
+      if (isFinite(ll[0]) && isFinite(ll[1])) {
+        offer = 'See this on the globe?';
+        switchAction = () => void chooseHemi(ll[1], ll[0]);
+      }
+    }
+  }
+  switchChip.hidden = !offer;
+  setText(switchChip, offer);
+}
+
+function wireStart(): void {
+  startCard = document.getElementById('start-card')!;
+  startHint = document.getElementById('start-hint')!;
+  startMsg = document.getElementById('start-msg')!;
+  startPlaces = document.getElementById('start-places')!;
+  scopeChip = document.getElementById('scope-chip') as HTMLButtonElement;
+  crsChip = document.getElementById('crs-chip') as HTMLButtonElement;
+  bgChip = document.getElementById('bg-chip') as HTMLSelectElement;
+  switchChip = document.getElementById('switch-chip') as HTMLButtonElement;
+
+  startCard.addEventListener('click', (e) => {
+    const door = (e.target as HTMLElement).closest('[data-door]')?.getAttribute('data-door');
+    if (!door) return;
+    if (door === 'global') void chooseGlobal();
+    else if (door === 'hemi-north') void chooseHemi(90);
+    else if (door === 'hemi-south') void chooseHemi(-90);
+    else if (door === 'hemi-here') void chooseHemi();
+    else if (door === 'local-pick') startPicking();
+    else if (door === 'local-me') {
+      startMsg.textContent = 'Asking for your location...';
+      deviceLocation().then(
+        (p) => chooseLocal(p),
+        (err) => {
+          // No location: the typed place is the fallback.
+          startMsg.textContent = `No location (${err.message}). Type a place, an address or coordinates above.`;
+          (document.getElementById('start-place') as HTMLInputElement).focus();
+        });
+    } else if (door === 'data-file') {
+      (document.getElementById('vector-file') as HTMLInputElement).click();
+    }
+  });
+  document.getElementById('start-place-form')!.addEventListener('submit', (e) => {
+    e.preventDefault();
+    void findPlace((document.getElementById('start-place') as HTMLInputElement).value);
+  });
+  document.getElementById('start-url-form')!.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const u = (document.getElementById('start-url') as HTMLInputElement).value.trim();
+    if (u) void chooseData(u);
+  });
+  document.getElementById('start-close')!.addEventListener('click', hideStart);
+
+  // Any touch of the map stops the spin; a click while picking is the place.
+  let downX = 0, downY = 0;
+  canvas.addEventListener('mousedown', (e) => { stopSpin(); downX = e.clientX; downY = e.clientY; });
+  canvas.addEventListener('wheel', stopSpin, { passive: true });
+  canvas.addEventListener('touchstart', stopSpin, { passive: true });
+  canvas.addEventListener('mouseup', async (e) => {
+    if (!picking || Math.hypot(e.clientX - downX, e.clientY - downY) > 4) return;
+    const r = canvas.getBoundingClientRect();
+    const p = await lonLatAt(e.clientX - r.left, e.clientY - r.top);
+    if (p) await chooseLocal(p);
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && picking) showStart(startOpen || scope === null);
+  });
+
+  scopeChip.addEventListener('click', () => showStart(false));
+  crsChip.addEventListener('click', () => {
+    document.getElementById('controls')!.classList.remove('collapsed');
+    (document.getElementById('view-details') as HTMLDetailsElement).open = true;
+  });
+  bgChip.addEventListener('change', () => void setBackground(bgChip.value));
+  switchChip.addEventListener('click', () => switchAction?.());
+
+  coastlineInput = document.getElementById('coastline') as HTMLInputElement;
+  coastlineInput.checked = showCoastline;
+  coastlineInput.addEventListener('change', () => {
+    showCoastline = coastlineInput.checked;
+    layoutAllLayers();
+    render(viewController.getState());
+    scheduleRefresh(viewController.getState());
+    scheduleUrlUpdate();
+  });
+}
+
+/** `?scope=global&lon_0=150`, `?scope=hemi&at=lon,lat`, `?scope=local&at=lon,lat`. */
+async function doorFromParams(params: URLSearchParams): Promise<boolean> {
+  const at = (params.get('at') || '').split(',').map(Number);
+  const hasAt = at.length === 2 && at.every(isFinite);
+  const s = params.get('scope');
+  if (s === 'global') {
+    const l0 = parseFloat(params.get('lon_0') || '');
+    await chooseGlobal(isFinite(l0) ? l0 : hasAt ? at[0] : 0);
+    return true;
+  }
+  if (s === 'hemi') {
+    if (hasAt) await chooseHemi(at[1], at[0]);
+    else await chooseHemi();
+    return true;
+  }
+  if (s === 'local' && hasAt) {
+    await chooseLocal({ lon: at[0], lat: at[1], label: `${at[0]}, ${at[1]}` });
+    return true;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1944,6 +2468,7 @@ async function main() {
   makeViewController(initial);
   syncUI();
   wireEditPanel();
+  wireStart();
 
   // Wire up UI
   async function loadOrAdd(url: string, replace: boolean): Promise<void> {
@@ -2006,8 +2531,11 @@ async function main() {
   const fileInput = document.getElementById('vector-file') as HTMLInputElement;
   document.getElementById('vector-file-btn')!.addEventListener('click', () => fileInput.click());
   const addFiles = async (files: FileList | File[]) => {
+    const list = Array.from(files);
+    // From the start card, the first file sets the view (its own CRS).
+    if (!startCard.hidden && list.length) await chooseData(list.shift()!);
     let first = true;
-    for (const f of Array.from(files)) {
+    for (const f of list) {
       await addVectorLayer(f, first);
       first = false;
     }
@@ -2237,14 +2765,40 @@ async function main() {
     document.getElementById('controls')!.classList.toggle('collapsed');
   });
 
-  // Load layers from URL params, or the default
-  const urls = params.getAll('url');
-  if (urls.length === 0) urls.push(DEFAULT_COG);
-  urlInput.value = urls[0];
-  for (const u of urls) {
-    if (vectorFormatOf(u)) await addVectorLayer(u);
-    else await addLayer(u);
+  void loadCoastline();
+  // No parameters at all: the start card, over a turning globe.
+  if (params.toString() === '') {
+    showStart(true);
+    startSpin();
+    await setBackground(backgroundFor(centreLat));
+    console.log('Viewer ready!');
+    return;
   }
+  // A scope with no view: the start card's choice, made by the link.
+  if (!params.has('mode') && params.has('scope') && await doorFromParams(params)) {
+    console.log('Viewer ready!');
+    return;
+  }
+  // Otherwise the view the link describes, with its layers. A background
+  // preset among them is the one the top bar controls.
+  const urls = params.getAll('url');
+  urlInput.value = urls[0] ?? '';
+  for (const u of urls) {
+    if (vectorFormatOf(u)) {
+      await addVectorLayer(u);
+      continue;
+    }
+    const layer = await addLayer(u);
+    const key = layer && backgroundId === null ? backgroundKeyOf(u.split('#')[0]) : null;
+    if (layer && key) {
+      layers = [layer, ...layers.filter(l => l !== layer)];
+      backgroundId = layer.id;
+      backgroundKey = key;
+      bgChip.value = key;
+    }
+  }
+  if (urls.length === 0) await setBackground(backgroundFor(mode === 'centred' ? centreLat : 0));
+  else if (backgroundId === null) bgChip.value = 'none';
 
   console.log('Viewer ready!');
 }
