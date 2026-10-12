@@ -13,8 +13,9 @@
 //            taken back through the source and display CRSs and measured
 //            against the pixel (p50, p99, p99.9, max)
 //
-// The source is a global lon/lat texture; the canvas is 1000 x 800 with the
-// whole map in view. Sampling is every 2 pixels.
+// The source is a global lon/lat texture, or a Web Mercator one (which
+// stops at 85 degrees); the canvas is 1000 x 800 with the whole map in view.
+// Sampling is every 2 pixels.
 //
 //   node tools/check-mesh.mjs
 import { build } from 'esbuild';
@@ -33,7 +34,8 @@ writeFileSync(entry, [
   "export * from './src/core/centred';",
   "export * from './src/engine/mesh';",
   "export * from './src/engine/uv';",
-  "export * from './src/engine/refine';"
+  "export * from './src/engine/refine';",
+  "export { default as proj4 } from 'proj4';"
 ].join('\n') + '\n');
 try {
   await build({ entryPoints: [entry], bundle: true, format: 'cjs', platform: 'node', outfile: bundle, logLevel: 'error' });
@@ -45,17 +47,26 @@ unlinkSync(bundle);
 w.registerProjections();
 
 const W = 1000, H = 800, STEP = 2;
-const SRC = 'EPSG:4326', SB = { minX: -180, minY: -90, maxX: 180, maxY: 90 };
-const R = 6378137;
+const R = 6378137, M = Math.PI * R;
+const SOURCES = {
+  lonlat: { crs: 'EPSG:4326', bounds: { minX: -180, minY: -90, maxX: 180, maxY: 90 } },
+  merc: { crs: 'EPSG:3857', bounds: { minX: -M, minY: -M, maxX: M, maxY: M } }
+};
 const P = w.CENTRED_PRESETS;
-// name, display CRS, width and height of the map in display units
+// name, display CRS, width and height of the view in display units, source
 const cases = [
   ['orthographic', w.centredCRS(P.ortho.template, 147, -42), 2 * R, 2 * R],
   ['orthographic, south pole', w.centredCRS(P.ortho.template, 0, -90), 2 * R, 2 * R],
   ['tilted perspective', '+proj=tpers +h=3000000 +tilt=30 +azi=20 +lon_0=147 +lat_0=-42 +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs', 6.0e6, 6.0e6],
   ['Equal Earth', w.centredCRS(P.eqearth.template, 150, 0), 34.5e6, 16.8e6],
   ['Winkel Tripel', w.centredCRS(P.wintri.template, 150, 0), 36.0e6, 20.0e6],
-  ['sinusoidal', w.centredCRS(P.sinu.template, 150, 0), 40.1e6, 20.0e6]
+  ['sinusoidal', w.centredCRS(P.sinu.template, 150, 0), 40.1e6, 20.0e6],
+  // Edges that are not the edge of the Earth: the interruptions of the
+  // homolosine are straight cuts, and so is the top and bottom of an oblique
+  // Mercator (where its strip would repeat). Over Web Mercator imagery the
+  // view also has the texture's own edge at 85 degrees round each pole.
+  ['interrupted homolosine', w.centredCRS(P.igh.template, 0, 0), 40.1e6, 18.0e6],
+  ['oblique Mercator, Web Mercator source', w.centredCRS(P.omerc.template, 58, 28.6), 45e6, 36e6, 'merc']
 ];
 
 /** Barycentric lookup of the texture coordinate under a screen pixel. */
@@ -89,7 +100,10 @@ function locator(g, s) {
   };
 }
 
-function measure(g, geo, s, tol) {
+function measure(g, geo, s, tol, src) {
+  const toLonLat = w.proj4(src.crs, 'EPSG:4326');
+  const fromLonLat = w.proj4('EPSG:4326', src.crs);
+  const { minX: bx0, minY: by0, maxX: bx1, maxY: by1 } = src.bounds;
   const find = locator(g, s);
   let valid = 0, missed = 0, extra = 0;
   const errs = [];
@@ -98,13 +112,19 @@ function measure(g, geo, s, tol) {
       const dx = (x - W / 2) / s, dy = -(y - H / 2) / s;
       const ll = geo.toGeoSync(new Float64Array([dx, dy]));
       const bk = geo.fromGeoSync(ll);
-      const on = isFinite(ll[0]) && isFinite(bk[0]) && Math.hypot(bk[0] - dx, bk[1] - dy) < tol;
-      const uv = find(x, y);
+      let on = isFinite(ll[0]) && isFinite(bk[0]) && Math.hypot(bk[0] - dx, bk[1] - dy) < tol;
+      if (on) {
+        // and inside the texture, which the shader draws nothing beyond
+        const sy = fromLonLat.forward([ll[0], ll[1]])[1];
+        on = sy >= by0 && sy <= by1;
+      }
+      let uv = find(x, y);
+      if (uv && (uv[1] < 0 || uv[1] > 1)) uv = null;
       if (on) valid++;
       if (on && !uv) { missed++; continue; }
       if (!on && uv) { extra++; continue; }
       if (!uv) continue;
-      const lon = -180 + (((uv[0] % 1) + 1) % 1) * 360, lat = 90 - uv[1] * 180;
+      const [lon, lat] = toLonLat.forward([bx0 + (((uv[0] % 1) + 1) % 1) * (bx1 - bx0), by1 - uv[1] * (by1 - by0)]);
       const d = geo.fromGeoSync(new Float64Array([lon, lat]));
       const e = Math.hypot(d[0] - dx, d[1] - dy) * s;
       // A pixel within a pixel of the edge can interpolate to just over
@@ -120,7 +140,8 @@ function measure(g, geo, s, tol) {
 let failures = 0;
 const pct = (v) => `${(100 * v).toFixed(2)}%`.padStart(6);
 const f2 = (v) => v.toFixed(2).padStart(5);
-for (const [name, crs, mw, mh] of cases) {
+for (const [name, crs, mw, mh, srcName = 'lonlat'] of cases) {
+  const src = SOURCES[srcName], SRC = src.crs, SB = src.bounds;
   const geo = w.geoTransform(crs);
   const s = Math.min(W / (mw * 1.02), H / (mh * 1.02));
   const hw = W / 2 / s, hh = H / 2 / s;
@@ -134,19 +155,19 @@ for (const [name, crs, mw, mh] of cases) {
     const tol = (2 * hw / n) * 1e-2;
     const t0 = performance.now();
     const g = w.buildLayerGeometry(grid.positions, grid.indices, crs, SRC, SB, tol, true, null);
-    row(`grid ${n}`, g, performance.now() - t0, measure(g, geo, s, tol));
+    row(`grid ${n}`, g, performance.now() - t0, measure(g, geo, s, tol, src));
   }
   const grid = w.generateGridMesh(rect, 64, Math.round(64 * H / W));
   const tol = (2 * hw / 64) * 1e-2;
   const opts = {
     sourceCRS: SRC, sourceBounds: SB, tolerance: tol, wrapU: true, wrap: null,
-    pxSize: 1 / s, maxErrorPx: 0.5, minCellPx: 2, edgeSteps: 6
+    pxSize: 1 / s, maxErrorPx: 0.5, minCellPx: 2
   };
   w.refineSync(grid, geo, opts);   // once to warm up, as the plain grids were by the grid 64 run
   const t0 = performance.now();
   const g = w.refineSync(grid, geo, opts);
   const ms = performance.now() - t0;
-  const m = measure(g, geo, s, tol);
+  const m = measure(g, geo, s, tol, src);
   row('refined 64', g, ms, m);
   const ok = m.missed < 0.002 && m.extra < 0.002 && m.p99 < 0.6;
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}: refined mesh within 0.2% coverage and p99 < 0.6 px`);

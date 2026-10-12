@@ -200,7 +200,6 @@ export class MeshEngine implements LayerEngine {
       pxSize: px,
       maxErrorPx: 0.5,
       minCellPx: 2,
-      edgeSteps: 6,
       // a little beyond the canvas, so a small pan does not show the edge
       viewRect: [view.centreX - hw * 1.1, view.centreY - hh * 1.1, view.centreX + hw * 1.1, view.centreY + hh * 1.1]
     };

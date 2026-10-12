@@ -340,6 +340,31 @@ let added = false;
 export function registerExtraProjections(): void {
   if (added) return;
   added = true;
-  const store = (proj4 as unknown as { Proj: { projections: { add(p: unknown): void } } }).Proj.projections;
+  const store = (proj4 as unknown as {
+    Proj: { projections: { add(p: unknown): void; get(name: string): ProjDef | false | undefined } }
+  }).Proj.projections;
   for (const p of EXTRA_PROJECTIONS) store.add(p);
+
+  // proj4js's oblique Mercator forward takes lon - lam0 as given, without
+  // bringing it into [-180, 180] as PROJ does, and its sin(B * lon) is not
+  // periodic when B != 1 (the ellipsoid). So a longitude more than 180
+  // degrees from the centre line (-150 with lonc=58) lands up to a hundred
+  // km from where the inverse puts it: coastlines drift off the imagery on
+  // the far side. Normalise first, as PROJ does.
+  const omerc = store.get('omerc');
+  if (omerc && omerc.forward) {
+    const forward = omerc.forward;
+    store.add({
+      ...omerc,
+      forward(this: { lam0: number; over?: boolean }, q: P) {
+        q.x = this.lam0 + adjustLon(q.x - this.lam0, this.over);
+        return forward.call(this, q);
+      }
+    });
+  }
+}
+
+interface ProjDef {
+  names: string[];
+  forward?: (this: unknown, p: P) => P;
 }

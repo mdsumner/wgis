@@ -1,24 +1,38 @@
 /**
  * Adaptive refinement of the display mesh, where a regular grid is not
- * enough: at the limb of a globe, the outline of a world projection, and
- * around a pole in a periodic texture.
+ * enough: at the edge of the map, round a pole in a periodic texture, and
+ * where the projection curves too hard for linear interpolation.
  *
  * The base grid stays as it is wherever it is good enough. A cell is split
- * in four, recursively, when
+ * in four, recursively, when linear interpolation inside it puts the
+ * texture more than `maxErrorPx` screen pixels from where it belongs, or
+ * when the edge of the map crosses it and is not straight there.
  *
- *   - its corners are partly on the map and partly off (the limb, the
- *     outline): split down to about a screen pixel, then the leaf
- *     triangles are clipped where their edges leave the map, found by
- *     bisection, so the edge of the map is smooth rather than a staircase;
- *   - its texture coordinates wrap more than half way round (a pole in a
- *     periodic texture): split down to about a pixel, then dropped, so
- *     the hole is a pixel wide rather than a cell;
- *   - linear interpolation inside it puts the texture more than
- *     `maxErrorPx` screen pixels from where it belongs. The test points
- *     are the cell centre and edge midpoints; the error there is the
- *     texture-space difference between interpolated and true coordinates,
- *     taken back to display space through the cell's Jacobian.
+ * "The edge of the map" is wherever a display point stops round-tripping
+ * through lon/lat, and that means different things in different CRSs:
  *
+ *   - the limb of a globe or the outline of a world projection: curved,
+ *     so it is refined down to about a pixel;
+ *   - a cut, where the map would carry on in another copy (the y period
+ *     of an oblique Mercator, the interruptions of a homolosine): usually
+ *     straight, so it needs no refinement at all;
+ *   - a hole, a sliver of failed points inside the map.
+ *
+ * So a cell the edge crosses has the two places the edge meets its sides
+ * found by bisection, and is kept whole when the edge between them is a
+ * straight line to within `maxErrorPx`, every other point of the cell is
+ * on the side of that line it should be, and the texture over the part on
+ * the map is linear to within `maxErrorPx`. Leaves the edge crosses have
+ * their triangles clipped where it crosses their sides.
+ *
+ * The edge of the source texture is another matter: the shader discards
+ * outside it, so error is measured on texture coordinates clamped to the
+ * texture (beyond a Web Mercator texture's 85 degrees nothing is drawn, so
+ * nothing there needs refining), and triangles wholly outside are dropped.
+ *
+ * The error test points are the cell centre and edge midpoints; the error
+ * there is the texture-space difference between interpolated and true
+ * coordinates, taken back to display space through the cell's Jacobian.
  * The mesh is planar, so the T-junctions between a split cell and its
  * neighbour leave no gaps; the texture along such an edge differs from
  * the neighbour's by less than the error tolerance, which the edge
@@ -51,12 +65,14 @@ export interface RefineOptions {
   maxErrorPx?: number;
   /** Smallest cell, in screen pixels. */
   minCellPx?: number;
-  /** Bisection steps for the edge of the map. */
+  /** Most bisection steps for the edge of the map (it stops at 1/4 px). */
   edgeSteps?: number;
   /** Stop refining past this many evaluated points. */
   maxPoints?: number;
   /** Only cells meeting this display rectangle are refined. */
   viewRect?: [number, number, number, number];
+  /** Told of every split: the cell (x, y, width, height) and why. */
+  trace?: (x: number, y: number, w: number, h: number, why: string) => void;
 }
 
 /** What the generator asks for: display xy pairs. What it is given back. */
@@ -71,6 +87,10 @@ export interface RefineStats {
   leaves: number;
   clipped: number;
   dropped: number;
+  /** Triangles wholly outside the source texture. */
+  outside: number;
+  /** Cells the edge of the map crosses that were kept whole. */
+  straight: number;
   budgetHit: boolean;
 }
 
@@ -107,10 +127,13 @@ class Points {
 
 interface Cell { i: number; j: number; s: number }
 
+/** A stretch of display line from a point on the map (a) to one off it (b). */
+interface Seg { a: number; b: number; lo: number; hi: number; id: number; len: number }
+
 export function* refineLayerGeometry(grid: GridMesh, o: RefineOptions): Gen {
   const maxErrorPx = o.maxErrorPx ?? 0.5;
   const minCellPx = o.minCellPx ?? 1;
-  const edgeSteps = o.edgeSteps ?? 8;
+  const edgeSteps = o.edgeSteps ?? 16;
   const maxPoints = o.maxPoints ?? 200000;
   const [minX, minY, maxX, maxY] = grid.bounds;
   const cellW = (maxX - minX) / grid.cols, cellH = (maxY - minY) / grid.rows;
@@ -133,6 +156,12 @@ export function* refineLayerGeometry(grid: GridMesh, o: RefineOptions): Gen {
       lattice.set(key, k);
       pending.push(k);
     }
+    return k;
+  };
+  /** A point off the lattice, evaluated with the next batch. */
+  const free = (x: number, y: number): number => {
+    const k = pts.add(x, y);
+    pending.push(k);
     return k;
   };
 
@@ -193,17 +222,63 @@ export function* refineLayerGeometry(grid: GridMesh, o: RefineOptions): Gen {
     }
   }
 
+  /**
+   * Bisect each segment until the crossing is known to a quarter pixel (or
+   * edgeSteps run out). Afterwards `id` is the last point found on the map,
+   * or -1 when none was.
+   */
+  function* bisect(segs: Seg[]): Generator<Float64Array, void, DisplayEval> {
+    const fine = 0.25 * o.pxSize;
+    let active = segs.filter((e) => e.len * (e.hi - e.lo) > fine);
+    for (let step = 0; step < edgeSteps && active.length; step++) {
+      const probe = active.map((e) => {
+        const m = (e.lo + e.hi) / 2;
+        return free(pts.x[e.a] + (pts.x[e.b] - pts.x[e.a]) * m, pts.y[e.a] + (pts.y[e.b] - pts.y[e.a]) * m);
+      });
+      yield* flush();
+      active.forEach((e, q) => {
+        const m = (e.lo + e.hi) / 2;
+        if (pts.valid[probe[q]]) {
+          e.lo = m;
+          e.id = probe[q];
+        } else {
+          e.hi = m;
+        }
+      });
+      active = active.filter((e) => e.len * (e.hi - e.lo) > fine);
+    }
+  }
+  const seg = (a: number, b: number): Seg => {
+    const [va, vb] = pts.valid[a] ? [a, b] : [b, a];
+    return { a: va, b: vb, lo: 0, hi: 1, id: -1, len: Math.hypot(pts.x[vb] - pts.x[va], pts.y[vb] - pts.y[va]) };
+  };
+  const crossX = (e: Seg) => pts.x[e.a] + (pts.x[e.b] - pts.x[e.a]) * e.lo;
+  const crossY = (e: Seg) => pts.y[e.a] + (pts.y[e.b] - pts.y[e.a]) * e.lo;
+
   /** u of b brought within half a texture of a, when u repeats. */
   const near = (a: number, b: number): number => (o.wrapU ? b - Math.round(b - a) : b);
+  /** What the shader draws: nothing beyond the texture, so error there is moot. */
+  const clampU = (u: number): number => (o.wrapU ? u : Math.min(1, Math.max(0, u)));
+  const clampV = (v: number): number => Math.min(1, Math.max(0, v));
 
   // Output triangles, as point ids (crossing points are points too).
   const tris: number[] = [];
   const mixedLeaves: number[] = [];   // triangles (3 ids each) with mixed validity
-  const stats: RefineStats = { points: 0, levels: 0, leaves: 0, clipped: 0, dropped: 0, budgetHit: false };
+  const stats: RefineStats = {
+    points: 0, levels: 0, leaves: 0, clipped: 0, dropped: 0, outside: 0, straight: 0, budgetHit: false
+  };
+
+  const corners = (c: Cell): [number, number, number, number] =>
+    [at(c.i, c.j), at(c.i + c.s, c.j), at(c.i, c.j + c.s), at(c.i + c.s, c.j + c.s)];
+  /** The centre and edge midpoints: bottom, top, left, right, centre. */
+  const mids = (c: Cell): [number, number, number, number, number] => {
+    const h = c.s >> 1;
+    return [at(c.i + h, c.j), at(c.i + h, c.j + c.s), at(c.i, c.j + h), at(c.i + c.s, c.j + h), at(c.i + h, c.j + h)];
+  };
 
   /** Two triangles for a cell, in the base grid's pattern (diagonal c10-c01). */
   const emitCell = (c: Cell, clip: boolean) => {
-    const c00 = at(c.i, c.j), c10 = at(c.i + c.s, c.j), c01 = at(c.i, c.j + c.s), c11 = at(c.i + c.s, c.j + c.s);
+    const [c00, c10, c01, c11] = corners(c);
     for (const t of [[c00, c01, c10], [c10, c01, c11]]) {
       const nv = pts.valid[t[0]] + pts.valid[t[1]] + pts.valid[t[2]];
       if (nv === 3) tris.push(t[0], t[1], t[2]);
@@ -218,41 +293,81 @@ export function* refineLayerGeometry(grid: GridMesh, o: RefineOptions): Gen {
     return x0 <= vr[2] && x0 + c.s * stepX >= vr[0] && y0 <= vr[3] && y0 + c.s * stepY >= vr[1];
   };
 
+  let why = '';
   /**
    * How far linear interpolation puts the texture from where it belongs,
    * in screen pixels, at the cell's centre and edge midpoints. Infinity when
    * a test point is off the map or the cell wraps round the texture.
    */
   const cellError = (c: Cell): number => {
-    const h = c.s >> 1;
-    const c00 = at(c.i, c.j), c10 = at(c.i + c.s, c.j), c01 = at(c.i, c.j + c.s), c11 = at(c.i + c.s, c.j + c.s);
+    const [c00, c10, c01, c11] = corners(c);
     const u00 = pts.u[c00], u10 = near(u00, pts.u[c10]), u01 = near(u00, pts.u[c01]), u11 = near(u00, pts.u[c11]);
     const v00 = pts.v[c00], v10 = pts.v[c10], v01 = pts.v[c01], v11 = pts.v[c11];
-    if (o.wrapU && Math.max(u00, u10, u01, u11) - Math.min(u00, u10, u01, u11) > 0.5) return Infinity;
+    if (o.wrapU && Math.max(u00, u10, u01, u11) - Math.min(u00, u10, u01, u11) > 0.5) { why = 'wrap'; return Infinity; }
     // Jacobian d(uv)/d(display) across the cell.
     const w = c.s * stepX, hh = c.s * stepY;
     const dudx = ((u10 - u00) + (u11 - u01)) / (2 * w), dudy = ((u01 - u00) + (u11 - u10)) / (2 * hh);
     const dvdx = ((v10 - v00) + (v11 - v01)) / (2 * w), dvdy = ((v01 - v00) + (v11 - v10)) / (2 * hh);
     const det = dudx * dvdy - dudy * dvdx;
-    if (!isFinite(det) || Math.abs(det) < 1e-30) return Infinity;
-    const tests: [number, number, number, number, number][] = [
+    if (!isFinite(det) || Math.abs(det) < 1e-30) { why = 'singular'; return Infinity; }
+    const [mb, mt, ml, mr, mc] = mids(c);
+    const tests: [number, number, number][] = [
       // id, interpolated u, v
-      [at(c.i + h, c.j), (u00 + u10) / 2, (v00 + v10) / 2, 0, 0],
-      [at(c.i + h, c.j + c.s), (u01 + u11) / 2, (v01 + v11) / 2, 0, 0],
-      [at(c.i, c.j + h), (u00 + u01) / 2, (v00 + v01) / 2, 0, 0],
-      [at(c.i + c.s, c.j + h), (u10 + u11) / 2, (v10 + v11) / 2, 0, 0],
-      [at(c.i + h, c.j + h), (u10 + u01) / 2, (v10 + v01) / 2, 0, 0]
+      [mb, (u00 + u10) / 2, (v00 + v10) / 2],
+      [mt, (u01 + u11) / 2, (v01 + v11) / 2],
+      [ml, (u00 + u01) / 2, (v00 + v01) / 2],
+      [mr, (u10 + u11) / 2, (v10 + v11) / 2],
+      [mc, (u10 + u01) / 2, (v10 + v01) / 2]
     ];
     let worst = 0;
     for (const [id, ui, vi] of tests) {
-      if (!pts.valid[id]) return Infinity;
-      const du = ui - near(u00, pts.u[id]), dv = vi - pts.v[id];
+      if (!pts.valid[id]) { why = 'hole'; return Infinity; }
+      const du = clampU(ui) - clampU(near(u00, pts.u[id])), dv = clampV(vi) - clampV(pts.v[id]);
       // display offset = J^-1 (du, dv)
       const ddx = (dvdy * du - dudy * dv) / det;
       const ddy = (-dvdx * du + dudx * dv) / det;
       const e = Math.hypot(ddx, ddy) / o.pxSize;
       if (e > worst) worst = e;
     }
+    why = 'error';
+    return worst;
+  };
+
+  /**
+   * For a cell the edge of the map crosses: how far the texture over the
+   * part on the map is from linear, in screen pixels. The affine fit to the
+   * points on the map (corners, midpoints and the edge crossings) and its
+   * worst residual, taken back to display space.
+   */
+  const partError = (ids: number[]): number => {
+    if (ids.length < 4) return Infinity;
+    const u0 = pts.u[ids[0]];
+    let mx = 0, my = 0, mu = 0, mv = 0;
+    const us = ids.map((id) => near(u0, pts.u[id]));
+    if (o.wrapU && Math.max(...us) - Math.min(...us) > 0.5) return Infinity;
+    ids.forEach((id, k) => { mx += pts.x[id]; my += pts.y[id]; mu += us[k]; mv += pts.v[id]; });
+    const n = ids.length;
+    mx /= n; my /= n; mu /= n; mv /= n;
+    let sxx = 0, sxy = 0, syy = 0, sxu = 0, syu = 0, sxv = 0, syv = 0;
+    ids.forEach((id, k) => {
+      const x = pts.x[id] - mx, y = pts.y[id] - my, u = us[k] - mu, v = pts.v[id] - mv;
+      sxx += x * x; sxy += x * y; syy += y * y;
+      sxu += x * u; syu += y * u; sxv += x * v; syv += y * v;
+    });
+    const dd = sxx * syy - sxy * sxy;
+    if (!(Math.abs(dd) > 0)) return Infinity;
+    const dudx = (sxu * syy - syu * sxy) / dd, dudy = (syu * sxx - sxu * sxy) / dd;
+    const dvdx = (sxv * syy - syv * sxy) / dd, dvdy = (syv * sxx - sxv * sxy) / dd;
+    const det = dudx * dvdy - dudy * dvdx;
+    if (!isFinite(det) || Math.abs(det) < 1e-30) return Infinity;
+    let worst = 0;
+    ids.forEach((id, k) => {
+      const x = pts.x[id] - mx, y = pts.y[id] - my;
+      const du = clampU(mu + dudx * x + dudy * y) - clampU(us[k]);
+      const dv = clampV(mv + dvdx * x + dvdy * y) - clampV(pts.v[id]);
+      const e = Math.hypot((dvdy * du - dudy * dv) / det, (-dvdx * du + dudx * dv) / det) / o.pxSize;
+      if (e > worst) worst = e;
+    });
     return worst;
   };
 
@@ -260,45 +375,98 @@ export function* refineLayerGeometry(grid: GridMesh, o: RefineOptions): Gen {
   // evaluated in one batch, then is kept, split, or treated as a leaf.
   let queue: Cell[] = [];
   for (let j = 0; j < grid.rows; j++) for (let i = 0; i < grid.cols; i++) queue.push({ i: i * S, j: j * S, s: S });
+  const nValid = (c: Cell): number => {
+    const k = corners(c);
+    return pts.valid[k[0]] + pts.valid[k[1]] + pts.valid[k[2]] + pts.valid[k[3]];
+  };
 
   while (queue.length) {
     stats.levels++;
-    for (const c of queue) {
-      at(c.i, c.j); at(c.i + c.s, c.j); at(c.i, c.j + c.s); at(c.i + c.s, c.j + c.s);
-    }
+    for (const c of queue) corners(c);
     yield* flush();
-    // Cells whose corners are all on the map get their test points; mixed
-    // cells need none (they split, or are clipped at the finest level).
-    for (const c of queue) {
-      if (c.s < 2 || !inView(c)) continue;
-      const nv = pts.valid[at(c.i, c.j)] + pts.valid[at(c.i + c.s, c.j)] +
-        pts.valid[at(c.i, c.j + c.s)] + pts.valid[at(c.i + c.s, c.j + c.s)];
-      if (nv === 4) {
-        const h = c.s >> 1;
-        at(c.i + h, c.j); at(c.i + h, c.j + c.s); at(c.i, c.j + h); at(c.i + c.s, c.j + h); at(c.i + h, c.j + h);
-      }
-    }
+    // Cells on the map, or partly, get their test points.
+    for (const c of queue) if (c.s >= 2 && inView(c) && nValid(c) > 0) mids(c);
     yield* flush();
 
     const overBudget = pts.n > maxPoints;
     if (overBudget) stats.budgetHit = true;
     const next: Cell[] = [];
+    const split = (c: Cell, reason: string) => {
+      if (o.trace) o.trace(minX + c.i * stepX, minY + c.j * stepY, c.s * stepX, c.s * stepY, reason);
+      const h = c.s >> 1;
+      next.push({ i: c.i, j: c.j, s: h }, { i: c.i + h, j: c.j, s: h },
+        { i: c.i, j: c.j + h, s: h }, { i: c.i + h, j: c.j + h, s: h });
+    };
+    const edgeCells: { c: Cell; e: [Seg, Seg] }[] = [];
     for (const c of queue) {
-      const nv = pts.valid[at(c.i, c.j)] + pts.valid[at(c.i + c.s, c.j)] +
-        pts.valid[at(c.i, c.j + c.s)] + pts.valid[at(c.i + c.s, c.j + c.s)];
+      const nv = nValid(c);
       if (nv === 0) continue;   // off the map
       const seen = inView(c);
-      let split = false;
-      if (c.s >= 2 && !overBudget && seen) {
-        split = nv < 4 || cellError(c) > maxErrorPx;
-      }
-      if (split) {
-        const h = c.s >> 1;
-        next.push({ i: c.i, j: c.j, s: h }, { i: c.i + h, j: c.j, s: h },
-          { i: c.i, j: c.j + h, s: h }, { i: c.i + h, j: c.j + h, s: h });
-      } else {
+      if (c.s < 2 || overBudget || !seen) {
         emitCell(c, seen);
+        continue;
       }
+      const [c00, c10, c01, c11] = corners(c);
+      const [mb, mt, ml, mr, mc] = mids(c);
+      if (nv === 4 && pts.valid[mb] && pts.valid[mt] && pts.valid[ml] && pts.valid[mr] && pts.valid[mc]) {
+        if (cellError(c) > maxErrorPx) split(c, why);
+        else emitCell(c, true);
+        continue;
+      }
+      // The edge of the map crosses the cell. Walk round it: a simple edge
+      // goes in once and out once.
+      const ring = [c00, mb, c10, mr, c11, mt, c01, ml];
+      const changes: number[] = [];
+      for (let k = 0; k < 8; k++) if (pts.valid[ring[k]] !== pts.valid[ring[(k + 1) % 8]]) changes.push(k);
+      if (changes.length !== 2) {
+        split(c, nv === 4 ? 'hole' : 'tangle');
+        continue;
+      }
+      edgeCells.push({ c, e: [seg(ring[changes[0]], ring[(changes[0] + 1) % 8]), seg(ring[changes[1]], ring[(changes[1] + 1) % 8])] });
+    }
+
+    if (edgeCells.length) {
+      // Where the edge meets the cell's sides, then two probes either side
+      // of the middle of the chord between those, half the tolerance out.
+      yield* bisect(edgeCells.flatMap((ec) => ec.e));
+      const d = 0.5 * maxErrorPx * o.pxSize;
+      const probes = edgeCells.map(({ e }) => {
+        const ax = crossX(e[0]), ay = crossY(e[0]), bx = crossX(e[1]), by = crossY(e[1]);
+        const len = Math.hypot(bx - ax, by - ay);
+        if (len < o.pxSize) return null;
+        const nx = -(by - ay) / len, ny = (bx - ax) / len, mx = (ax + bx) / 2, my = (ay + by) / 2;
+        return [free(mx + nx * d, my + ny * d), free(mx - nx * d, my - ny * d)];
+      });
+      yield* flush();
+      edgeCells.forEach(({ c, e }, q) => {
+        const ax = crossX(e[0]), ay = crossY(e[0]), bx = crossX(e[1]), by = crossY(e[1]);
+        const len = Math.hypot(bx - ax, by - ay);
+        // Signed distance from the chord, positive on the side its normal points.
+        const side = (id: number) => (len > 0 ? ((pts.x[id] - ax) * -(by - ay) + (pts.y[id] - ay) * (bx - ax)) / len : 0);
+        const pr = probes[q];
+        // Which side of the chord is on the map: the side of a crossing's
+        // inner point, which is on the map by construction.
+        let onSide = 0;
+        for (const s of e) if (Math.abs(side(s.a)) > d) { onSide = Math.sign(side(s.a)); break; }
+        if (pr) {
+          if (pts.valid[pr[0]] === pts.valid[pr[1]]) { split(c, 'curve'); return; }
+          const prSide = pts.valid[pr[0]] ? 1 : -1;
+          if (onSide && onSide !== prSide) { split(c, 'curve'); return; }
+          onSide = prSide;
+        }
+        const ids = [...corners(c), ...mids(c)];
+        if (onSide) {
+          for (const id of ids) {
+            const sd = side(id);
+            if (Math.abs(sd) > d && (sd > 0 ? 1 : -1) * onSide > 0 !== !!pts.valid[id]) { split(c, 'curve'); return; }
+          }
+        }
+        const part = ids.filter((id) => pts.valid[id]);
+        for (const s of e) if (s.id >= 0) part.push(s.id);
+        if (partError(part) > maxErrorPx) { split(c, 'edge error'); return; }
+        stats.straight++;
+        emitCell(c, true);
+      });
     }
     queue = next;
   }
@@ -306,37 +474,18 @@ export function* refineLayerGeometry(grid: GridMesh, o: RefineOptions): Gen {
   // The edge of the map: each leaf triangle with corners on both sides is
   // clipped where its edges cross, found by bisection. Edges are shared
   // between neighbours, so their crossings are too.
-  const crossings = new Map<string, { a: number; b: number; lo: number; hi: number; id: number }>();
+  const crossings = new Map<string, Seg>();
   const edgeKey = (a: number, b: number) => (a < b ? `${a},${b}` : `${b},${a}`);
   for (let t = 0; t < mixedLeaves.length; t += 3) {
     for (let k = 0; k < 3; k++) {
       const a = mixedLeaves[t + k], b = mixedLeaves[t + (k + 1) % 3];
       if (pts.valid[a] === pts.valid[b]) continue;
       const key = edgeKey(a, b);
-      if (crossings.has(key)) continue;
-      const [va, vb] = pts.valid[a] ? [a, b] : [b, a];
-      crossings.set(key, { a: va, b: vb, lo: 0, hi: 1, id: -1 });
+      if (!crossings.has(key)) crossings.set(key, seg(a, b));
     }
   }
   const edges = [...crossings.values()];
-  for (let step = 0; step < edgeSteps && edges.length; step++) {
-    const probe: number[] = [];
-    for (const e of edges) {
-      const m = (e.lo + e.hi) / 2;
-      probe.push(pts.add(pts.x[e.a] + (pts.x[e.b] - pts.x[e.a]) * m, pts.y[e.a] + (pts.y[e.b] - pts.y[e.a]) * m));
-    }
-    pending.push(...probe);
-    yield* flush();
-    edges.forEach((e, q) => {
-      const m = (e.lo + e.hi) / 2;
-      if (pts.valid[probe[q]]) {
-        e.lo = m;
-        e.id = probe[q];
-      } else {
-        e.hi = m;
-      }
-    });
-  }
+  yield* bisect(edges);
   for (const e of edges) if (e.id < 0) e.id = e.a;   // never found: use the valid end
 
   for (let t = 0; t < mixedLeaves.length; t += 3) {
@@ -360,6 +509,12 @@ export function* refineLayerGeometry(grid: GridMesh, o: RefineOptions): Gen {
     const ua = pts.u[a], ub = near(ua, pts.u[b]), uc = near(ua, pts.u[c]);
     if (o.wrapU && Math.max(ua, ub, uc) - Math.min(ua, ub, uc) > 0.5) {
       stats.dropped++;
+      continue;
+    }
+    const va = pts.v[a], vb = pts.v[b], vc = pts.v[c];
+    if ((va < 0 && vb < 0 && vc < 0) || (va > 1 && vb > 1 && vc > 1) ||
+      (!o.wrapU && ((ua < 0 && ub < 0 && uc < 0) || (ua > 1 && ub > 1 && uc > 1)))) {
+      stats.outside++;
       continue;
     }
     const ids = [a, b, c], us = [ua, ub, uc];

@@ -39,11 +39,12 @@ folded into "View settings". Links can start from a choice:
 reopens the last view, layers and all (kept in the browser).
 
 **The edge of the map.** Once the view holds still, the raster mesh is
-refined where the regular grid falls short: at the limb of a globe, the
-outline of a world projection and around a pole it is split down to about
-2 pixels and clipped exactly at the edge, and wherever linear
-interpolation would put the texture more than half a pixel out it is
-split until it does not. The coarse grid is used while the view moves.
+refined where the regular grid falls short: where the edge of the map
+curves (the limb of a globe, the outline of a world projection) it is
+split down to about 2 pixels and clipped exactly at the edge, where the
+edge is a straight cut (the top of an oblique Mercator) it is clipped
+without splitting, and wherever linear interpolation would put the
+texture more than half a pixel out it is split until it does not. The coarse grid is used while the view moves.
 "refine edges" in the view settings turns this off; `docs/mesh-refinement.md`
 has the measurements.
 
