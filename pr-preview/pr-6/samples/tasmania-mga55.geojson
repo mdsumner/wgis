@@ -1,0 +1,124 @@
+{
+ "type": "FeatureCollection",
+ "crs": {
+  "type": "name",
+  "properties": {
+   "name": "urn:ogc:def:crs:EPSG::28355"
+  }
+ },
+ "features": [
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     526541,
+     5252349
+    ]
+   },
+   "properties": {
+    "name": "Hobart",
+    "note": "approximate position"
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     511530,
+     5413054
+    ]
+   },
+   "properties": {
+    "name": "Launceston",
+    "note": "approximate position"
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     445483,
+     5441057
+    ]
+   },
+   "properties": {
+    "name": "Devonport",
+    "note": "approximate position"
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     362018,
+     5332220
+    ]
+   },
+   "properties": {
+    "name": "Strahan",
+    "note": "approximate position"
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      305626,
+      5494221
+     ],
+     [
+      581230,
+      5215379
+     ]
+    ]
+   },
+   "properties": {
+    "name": "Cape Grim to Cape Pillar, straight in MGA55"
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      305626,
+      5494221
+     ],
+     [
+      1271398,
+      3895010
+     ]
+    ]
+   },
+   "properties": {
+    "name": "Cape Grim to Macquarie Island, straight in MGA55"
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      305626,
+      5494221
+     ],
+     [
+      -1058932,
+      2173535
+     ]
+    ]
+   },
+   "properties": {
+    "name": "Cape Grim to Casey, straight in MGA55"
+   }
+  }
+ ]
+}
