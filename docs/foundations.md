@@ -199,7 +199,40 @@ editing) is an optional extra, not a dependency.
   unmaintained; rwarp shows a Rust-to-wasm route that could cover the
   formats that matter.
 
-## 6. Step 2, concretely
+## 6. Later, not now: a 3D mode
+
+Out of scope for the first target, recorded so the 2D design does not
+close the door on it. The reference is the `native/` viewer in
+mdsumner/listmap3d (three.js, Tasmania 2 m DEM):
+
+- **Terrain tiles in the view CRS.** A quadtree over the DEM extent in
+  the chosen projection; each tile is a 128 x 128 mesh (with skirts)
+  sampled from the COG overview whose pixel matches the tile spacing,
+  split by screen-space error. No Web Mercator step anywhere.
+- **No reprojection when the view CRS is the DEM's own.** Sample
+  positions map straight to COG pixels; any other CRS reprojects each
+  sample position to the DEM CRS before sampling.
+- **Raw heights into the vertex buffer**, normals by central
+  differences, relief colour and shading in a small shader; no
+  Terrarium encode/decode.
+- **Vectors drawn into each tile's texture**, projected into the view
+  CRS once on arrival, so they sit exactly on the ground at any
+  exaggeration; picking happens in the view CRS.
+- **Imagery fetched in the view CRS** (ArcGIS `export` with
+  `imageSR`), which needs an EPSG code.
+
+What this asks of the 2D design now:
+
+- Keep the raster `Source` able to return *values* (heights), not only
+  textures, so a terrain engine can sit behind the same `LayerEngine`
+  seam.
+- Keep vector features in their own CRS and project on demand (call B),
+  so draping onto terrain tiles is the same transform with a different
+  target.
+- Keep the editor's pointer-to-layer-CRS step one function, so a 3D
+  pick (ray to terrain, then inverse projection) can replace it.
+
+## 7. Step 2, concretely
 
 1. Set up wgis: Vite and TypeScript as in ortho-cog-viewer, with its
    `core/` and `engine/` copied in and credited, and the same Pages
