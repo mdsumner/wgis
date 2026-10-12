@@ -55,6 +55,16 @@ CRS with a camera over it) or a *centred* one (the projection centre
 follows the view, so azimuthal projections spin like a globe). That
 project's README documents the raster side in full.
 
+**Local files**: "open file" (or "open a file" on the start card, or
+dropping files on the map) takes GeoTIFFs as well as vector files.
+geotiff.js reads a `File` with the same range semantics it uses over
+HTTP, so a COG on disk is tiled and overview reads out of the file, never
+a whole-file load, and nothing is uploaded anywhere. A `#fragment` typed
+in the URL box is applied to the GeoTIFFs you then open, so
+`#band=2&cmap=turbo` styles a file the way it styles a URL. Local layers
+are this page's only: they are left out of the link and do not survive a
+refresh.
+
 **Vectors**: GeoJSON, FlatGeobuf and GeoParquet, from a URL, a file
 picked with "open file", or files dropped on the map.
 

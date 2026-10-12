@@ -23,7 +23,7 @@ import { generateGridMesh, GridMesh } from './engine/mesh';
 import { registerProjections, ensureCRS, resolveCRS, unknownCRSMessage, setDefinitionProvider, executorFor } from './core/crs';
 import { projWasmProvider } from './core/projwasm';
 import { RasterSource, parseFragment, formatFragment } from './core/source';
-import { COGSource, splitCogUrl } from './core/cogSource';
+import { COGSource, splitCogUrl, registerLocalFile, isLocalUrl, isTiffFile } from './core/cogSource';
 import { COLORMAPS, colormapCss, colormapRange, isColormapName } from './core/colormap';
 import { XYZSource, TILE_PRESETS, isTileTemplate } from './core/xyzSource';
 import { isCapabilitiesUrl, fetchCapabilities, splitCapabilitiesUrl, ParsedCapabilities, WMTSLayerInfo } from './core/wmts';
@@ -1847,7 +1847,8 @@ function viewUrl(withLayers: boolean): string {
   if (scope) p.set('scope', scope);
   if (!showCoastline) p.set('coast', '0');
   if (withLayers) {
-    for (const l of layers) p.append('url', layerUrlWithState(l));
+    // Local files can't go on a link; they are this page's only.
+    for (const l of layers) if (!isLocalUrl(l.url)) p.append('url', layerUrlWithState(l));
     for (const v of vectorLayers) {
       const u = vectorUrlWithState(v);
       if (u) p.append('url', u);
@@ -2537,13 +2538,23 @@ async function main() {
   const fileInput = document.getElementById('vector-file') as HTMLInputElement;
   document.getElementById('vector-file-btn')!.addEventListener('click', () => fileInput.click());
   const addFiles = async (files: FileList | File[]) => {
-    const list = Array.from(files);
+    // GeoTIFFs become local:<name> raster layers, read in place from disk;
+    // any #fragment typed in the URL box is carried over, so
+    // "#band=2&cmap=turbo" styles a file the way it styles a URL.
+    const typed = urlInput.value.trim();
+    const frag = typed.includes('#') ? typed.slice(typed.indexOf('#')) : '';
+    const list: (string | File)[] = [];
+    for (const f of Array.from(files)) list.push(await isTiffFile(f) ? registerLocalFile(f) + frag : f);
     // From the start card, the first file sets the view (its own CRS).
     if (!startCard.hidden && list.length) await chooseData(list.shift()!);
     let first = true;
     for (const f of list) {
-      await addVectorLayer(f, first);
-      first = false;
+      if (typeof f === 'string') {
+        await addLayer(f);
+      } else {
+        await addVectorLayer(f, first);
+        first = false;
+      }
     }
   };
   fileInput.addEventListener('change', async () => {

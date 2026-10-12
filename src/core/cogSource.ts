@@ -4,7 +4,7 @@
  * geotiff.js only fetches the tiles that intersect the window.
  */
 
-import { fromUrl, GeoTIFF, GeoTIFFImage } from 'geotiff';
+import { fromUrl, fromBlob, GeoTIFF, GeoTIFFImage } from 'geotiff';
 import { RGBAImage, RasterSource, SourceLevel, TextureData, FloatStats, parseFragment } from './source';
 import { SourceBounds } from './bounds';
 import { resolveCRS, defineCRS, unknownCRSMessage, normaliseDefinition } from './crs';
@@ -12,12 +12,45 @@ import { resolveCRS, defineCRS, unknownCRSMessage, normaliseDefinition } from '.
 // One open handle per URL; the promise is cached so concurrent opens share it.
 const tiffCache = new Map<string, Promise<GeoTIFF>>();
 
+/**
+ * Files from the user's own disk, by the "local:<name>" URL they are given.
+ * geotiff.js reads a Blob with the same range semantics it uses over HTTP
+ * (File.slice), so a COG on disk is tiled and overview reads out of the
+ * file, never a whole-file load, and nothing is uploaded. Nothing about a
+ * local file can go on a link, so these URLs are for this page only.
+ */
+const localFiles = new Map<string, Blob>();
+
+export function registerLocalFile(file: File): string {
+  const url = `local:${file.name}`;
+  localFiles.set(url, file);
+  tiffCache.delete(url);
+  return url;
+}
+
+export function isLocalUrl(url: string): boolean {
+  return url.startsWith('local:');
+}
+
+/** A GeoTIFF by name, type, or its first four bytes (II*\0 or MM\0*). */
+export async function isTiffFile(file: File): Promise<boolean> {
+  if (/\.(tiff?|cog)$/i.test(file.name) || file.type === 'image/tiff') return true;
+  const b = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+  return (b[0] === 0x49 && b[1] === 0x49 && (b[2] === 42 || b[2] === 43) && b[3] === 0) ||
+    (b[0] === 0x4d && b[1] === 0x4d && b[2] === 0 && (b[3] === 42 || b[3] === 43));
+}
+
 function getTiff(url: string): Promise<GeoTIFF> {
   let p = tiffCache.get(url);
   if (!p) {
-    p = fromUrl(url);
-    tiffCache.set(url, p);
-    p.catch(() => tiffCache.delete(url));
+    const blob = localFiles.get(url);
+    if (isLocalUrl(url) && !blob) {
+      return Promise.reject(new Error(`${url.slice(6)} is a file from an earlier page; open it again`));
+    }
+    const opened: Promise<GeoTIFF> = blob ? fromBlob(blob) : fromUrl(url);
+    tiffCache.set(url, opened);
+    opened.catch(() => tiffCache.delete(url));
+    p = opened;
   }
   return p;
 }
@@ -194,7 +227,7 @@ export class COGSource implements RasterSource {
     this.fileOffset = fileOffset;
     this.scale = fileScale;
     this.offset = fileOffset;
-    this.label = url.split('/').pop() || url;
+    this.label = (isLocalUrl(url) ? url.slice(6) + ' (local file)' : url.split('/').pop()) || url;
     this.crs = crs;
     this.bounds = bounds;
     this.levels = levels;
@@ -335,6 +368,12 @@ export class COGSource implements RasterSource {
     }
 
     console.log(`COG fetch level ${level} window [${x0},${y0},${x1},${y1}] -> ${outW}x${outH}`);
+    // YCbCr (GDAL's default for JPEG-in-TIFF) has to be converted, which
+    // readRGB does; read as plain samples it shows as false colour.
+    if (image.fileDirectory.PhotometricInterpretation === 6) {
+      const rgb = await image.readRGB(opts as any);
+      return { rgba: toRGBA(rgb as unknown as ArrayLike<number>, outW, outH, 3), bounds };
+    }
     const rasters = await image.readRasters(opts as any);
     const data = rasters as unknown as ArrayLike<number>;
     const rgba = toRGBA(data, outW, outH, image.getSamplesPerPixel());
