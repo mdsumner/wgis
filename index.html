@@ -408,7 +408,7 @@
         }
       }
     </style>
-    <script type="module" crossorigin src="./assets/index-QTuMXsDL.js"></script>
+    <script type="module" crossorigin src="./assets/index-B6MUNsxd.js"></script>
   </head>
   <body>
     <div id="controls">
@@ -513,8 +513,11 @@
         <div class="control-row">
           <label>Vector:</label>
           <select id="vector-sample"><option value="">samples...</option></select>
-          <input type="file" id="vector-file" accept=".geojson,.json,.fgb,.parquet,.geoparquet" multiple hidden />
-          <button id="vector-file-btn" title="GeoJSON, FlatGeobuf or GeoParquet from this computer">open file</button>
+        </div>
+        <div class="control-row">
+          <label>Files:</label>
+          <input type="file" id="vector-file" accept=".tif,.tiff,image/tiff,.geojson,.json,.fgb,.parquet,.geoparquet" multiple hidden />
+          <button id="vector-file-btn" title="GeoTIFF, GeoJSON, FlatGeobuf or GeoParquet from this computer. Read in place, nothing is uploaded.">open file</button>
           <span class="hint">or drop files on the map</span>
         </div>
         <div id="wmts-picker" hidden>
@@ -623,7 +626,7 @@
           <button type="submit">open</button>
         </form>
         <div class="row">
-          <button data-door="data-file">open a file</button>
+          <button data-door="data-file" title="GeoTIFF/COG, GeoJSON, FlatGeobuf or GeoParquet from this computer. Read in place, nothing is uploaded.">open a file</button>
         </div>
       </div>
       <div class="foot">
