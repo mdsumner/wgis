@@ -103,8 +103,12 @@ countries). Some links:
 - [Polar square (EPSG:3031) in plain lon/lat](https://mdsumner.github.io/wgis/?mode=fixed&crs=EPSG:4326&extent=-180,180,-90,90&url=./samples/polar-box-3031.fgb)
 - [Coastline in Robinson centred on 150E](https://mdsumner.github.io/wgis/?mode=centred&proj=robin&center=150,0&zoom=-16.3&url=https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_coastline.geojson)
 
-(These work once GitHub Pages is turned on for the repository; the
-workflow in `.github/workflows/pages.yml` deploys `main`.)
+(These work once GitHub Pages serves the `gh-pages` branch: Settings >
+Pages > Source, "Deploy from a branch", `gh-pages`, root.
+`.github/workflows/pages.yml` builds `main` into that branch's root, and
+`.github/workflows/preview.yml` builds every pull request into
+`pr-preview/pr-<number>/`, comments the link on the PR, and removes it
+when the PR closes.)
 
 ## Limits, for now
 
