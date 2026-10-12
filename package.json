@@ -10,15 +10,21 @@
     "preview": "vite preview",
     "check-crs": "python3 tools/check-crs.py --engine 'node tools/proj-wasm-engine.mjs'",
     "check-worker": "node tools/check-worker-core.mjs && python3 tools/check-worker-core.py",
-    "check-warp": "node tools/check-warp.mjs"
+    "check-warp": "node tools/check-warp.mjs",
+    "check-vector": "node tools/check-vector.mjs",
+    "samples": "node tools/make-samples.mjs"
   },
   "dependencies": {
+    "flatgeobuf": "4.6.0",
     "geotiff": "^2.1.4-beta.1",
+    "hyparquet": "1.31.3",
     "proj-wasm": "0.1.0-alpha10",
     "proj4": "^2.11.0"
   },
   "devDependencies": {
+    "@types/geojson": "7946.0.16",
     "esbuild": "^0.28.2",
+    "hyparquet-writer": "0.16.11",
     "typescript": "^5.4.0",
     "vite": "^5.4.0"
   }

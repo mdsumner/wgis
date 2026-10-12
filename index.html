@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Ortho COG Viewer</title>
+    <title>wgis</title>
     <style>
       * {
         margin: 0;
@@ -18,6 +18,24 @@
       #app {
         width: 100%;
         height: 100%;
+        position: relative;
+      }
+      #app canvas.overlay {
+        position: absolute;
+        left: 0;
+        top: 0;
+        pointer-events: none;
+      }
+      #app.dropping {
+        outline: 3px dashed #9cf;
+        outline-offset: -3px;
+      }
+      .swatch {
+        width: 22px;
+        height: 14px;
+        padding: 0;
+        border: none;
+        background: none;
       }
       #controls {
         position: absolute;
@@ -221,8 +239,8 @@
   <body>
     <div id="controls">
       <div class="title-row">
-        <strong>Ortho COG Viewer</strong>
-        <a href="https://github.com/mdsumner/ortho-cog-viewer" target="_blank" rel="noopener">source</a>
+        <strong>wgis</strong>
+        <a href="https://github.com/mdsumner/wgis" target="_blank" rel="noopener">source</a>
         <span class="links">
           <button id="link-btn" title="Put a link to this view, layers and all, in the address bar and on the clipboard">link</button>
           <button id="reset-btn" title="Start again with the defaults">reset</button>
@@ -307,12 +325,19 @@
 
       <fieldset>
         <legend>Layers</legend>
-        <input type="text" id="cog-url" placeholder="COG URL, {z}/{x}/{y} template, or WMTS GetCapabilities URL" />
+        <input type="text" id="cog-url" placeholder="COG, {z}/{x}/{y}, WMTS GetCapabilities, or .geojson/.fgb/.parquet URL" />
         <button id="load-btn">Load</button>
         <button id="add-btn">Add</button>
         <div class="control-row">
           <label>Preset:</label>
           <select id="tile-preset"><option value="">presets...</option></select>
+        </div>
+        <div class="control-row">
+          <label>Vector:</label>
+          <select id="vector-sample"><option value="">samples...</option></select>
+          <input type="file" id="vector-file" accept=".geojson,.json,.fgb,.parquet,.geoparquet" multiple hidden />
+          <button id="vector-file-btn" title="GeoJSON, FlatGeobuf or GeoParquet from this computer">open file</button>
+          <span class="hint">or drop files on the map</span>
         </div>
         <div id="wmts-picker" hidden>
           <div class="control-row">

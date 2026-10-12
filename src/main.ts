@@ -1,7 +1,9 @@
 /**
- * Ortho COG Viewer - Main entry point
+ * wgis - Main entry point
  *
- * Multi-layer COG viewer with arbitrary source CRS -> arbitrary display CRS.
+ * Raster and vector layers, each in its own CRS, drawn in any display CRS.
+ * The raster side began as ortho-cog-viewer; vector layers keep their
+ * features in their own CRS and are densified into the display (vector/).
  *
  * The shell: view modes, the layer list, styling state, the UI and URL
  * state. A layer's pixels belong to its engine (see engine/types.ts), so
@@ -36,6 +38,9 @@ import { LayerEngine, RenderContext, Style, View, Curve, defaultStyle } from './
 import { MeshEngine } from './engine/meshEngine';
 import { WarpEngine, WarpOptions } from './engine/warpEngine';
 import { ResampleAlg } from './core/warp';
+import { VectorEngine, VectorStyle, defaultVectorStyle } from './vector/vectorEngine';
+import { readVectorUrl, readVectorFile, vectorFormatOf } from './vector/read';
+import { VectorData } from './vector/types';
 import proj4 from 'proj4';
 
 registerProjections();
@@ -135,6 +140,26 @@ interface ScaleState extends Style {
 
 let layers: Layer[] = [];
 let nextLayerId = 0;
+
+// Vector layers: features stay in their own CRS and are drawn on a 2D
+// canvas above the map (vector/vectorEngine.ts).
+interface VectorLayer {
+  id: number;
+  /** Where it came from; null for a local file, which cannot go in a link. */
+  url: string | null;
+  engine: VectorEngine;
+}
+let vectorLayers: VectorLayer[] = [];
+let overlay: HTMLCanvasElement;
+let overlayCtx: CanvasRenderingContext2D;
+const VECTOR_COLOURS = ['#ffd400', '#00e5ff', '#ff4fd8', '#7cfc00', '#ff8a3d', '#ffffff'];
+const VECTOR_SAMPLES: Record<string, { label: string; url: string }> = {
+  'polar-box': { label: 'square with a hole, straight edges in EPSG:3031 (FlatGeobuf)', url: './samples/polar-box-3031.fgb' },
+  'parallels': { label: 'parallels and meridians, straight in lon/lat (GeoParquet)', url: './samples/lonlat-lines.parquet' },
+  'mga55': { label: 'Tasmanian lines and points in MGA55, EPSG:28355 (GeoJSON)', url: './samples/tasmania-mga55.geojson' },
+  'coast': { label: 'Natural Earth 110m coastline (GeoJSON, remote)', url: 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_coastline.geojson' },
+  'countries': { label: 'FlatGeobuf test countries (remote)', url: 'https://raw.githubusercontent.com/flatgeobuf/flatgeobuf/master/test/data/countries.fgb' }
+};
 let baseMesh: GridMesh;
 let gl: WebGL2RenderingContext;
 let viewController: ViewController;
@@ -427,6 +452,13 @@ function layoutAllLayers(): void {
       console.error(`Failed to lay out layer ${layer.id}:`, err);
     }
   }
+  for (const v of vectorLayers) {
+    try {
+      v.engine.layout(ctx);
+    } catch (err) {
+      console.error(`Failed to lay out vector layer ${v.id}:`, err);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -680,9 +712,16 @@ function defaultCentredZoom(): number {
  * Centre / fit the view on a layer.
  */
 function fitLayer(layer: Layer): void {
+  fitBounds(layer.source.bounds, layer.source.crs);
+}
+
+/**
+ * Centre / fit the view on bounds given in some CRS.
+ */
+function fitBounds(b: SourceBounds, crsOfBounds: string): void {
+  if (!isFinite(b.minX) || !isFinite(b.maxY)) return;
   if (mode === 'centred') {
-    const b = layer.source.bounds;
-    const toGeo = proj4(layer.source.crs, 'EPSG:4326');
+    const toGeo = proj4(crsOfBounds, 'EPSG:4326');
     const [lon, lat] = toGeo.forward([(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2]);
     if (!isFinite(lon) || !isFinite(lat)) return;
     [centreLon, centreLat] = normaliseLonLat(lon, lat);
@@ -697,13 +736,13 @@ function fitLayer(layer: Layer): void {
       makeViewController({ centerX: 0, centerY: 0, zoom });
       syncCentreInputs();
     };
-    if (geo.fromGeoSync) apply(transformBounds(b, layer.source.crs, crs, 30));
-    else void boundsToDisplayAsync(b, layer.source.crs, geo).then(apply);
+    if (geo.fromGeoSync) apply(transformBounds(b, crsOfBounds, crs, 30));
+    else void boundsToDisplayAsync(b, crsOfBounds, geo).then(apply);
   } else {
     const geo = geoTransform(displayCRS);
     const apply = (tb: SourceBounds) => viewController.fitBounds(tb.minX, tb.minY, tb.maxX, tb.maxY);
-    if (geo.fromGeoSync) apply(transformBounds(layer.source.bounds, layer.source.crs, displayCRS, 30));
-    else void boundsToDisplayAsync(layer.source.bounds, layer.source.crs, geo).then(apply);
+    if (geo.fromGeoSync) apply(transformBounds(b, crsOfBounds, displayCRS, 30));
+    else void boundsToDisplayAsync(b, crsOfBounds, geo).then(apply);
   }
 }
 
@@ -795,6 +834,127 @@ function clearLayers(): void {
   layers = [];
 }
 
+// ---------------------------------------------------------------------------
+// Vector layers
+// ---------------------------------------------------------------------------
+
+/** Style keys a vector layer URL carries in its fragment, beside #crs=. */
+const VECTOR_STYLE_KEYS = ['colour', 'alpha', 'fill', 'width'];
+
+function vectorStyleFromUrl(url: string | null, fallback: string): VectorStyle {
+  const st = defaultVectorStyle(fallback);
+  if (!url) return st;
+  const f = fragmentParams(url);
+  const c = f.get('colour');
+  if (c && /^[0-9a-f]{6}$/i.test(c)) st.stroke = `#${c}`;
+  const num = (k: string, lo: number, hi: number) => {
+    const v = parseFloat(f.get(k) || '');
+    return isFinite(v) ? Math.max(lo, Math.min(hi, v)) : null;
+  };
+  st.opacity = num('alpha', 0, 1) ?? st.opacity;
+  st.fillOpacity = num('fill', 0, 1) ?? st.fillOpacity;
+  st.width = num('width', 0.25, 20) ?? st.width;
+  return st;
+}
+
+function vectorUrlWithState(v: VectorLayer): string | null {
+  if (!v.url) return null;
+  const [base, hash] = v.url.split('#');
+  const frag = new URLSearchParams(hash ?? '');
+  for (const k of VECTOR_STYLE_KEYS) frag.delete(k);
+  const st = v.engine.getStyle();
+  frag.set('colour', st.stroke.replace('#', ''));
+  if (st.opacity !== 1) frag.set('alpha', String(st.opacity));
+  frag.set('fill', String(st.fillOpacity));
+  if (st.width !== 1.5) frag.set('width', String(st.width));
+  return `${base}#${frag.toString()}`;
+}
+
+async function addVectorLayer(input: string | File, fit = false): Promise<VectorLayer | null> {
+  const url = typeof input === 'string' ? input : null;
+  let data: VectorData;
+  try {
+    data = typeof input === 'string' ? await readVectorUrl(input) : await readVectorFile(input);
+  } catch (err) {
+    console.error('Failed to read vector layer:', err);
+    alert(`Failed to read vector layer: ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
+  const colour = VECTOR_COLOURS[vectorLayers.length % VECTOR_COLOURS.length];
+  const v: VectorLayer = { id: nextLayerId++, url, engine: null as unknown as VectorEngine };
+  v.engine = new VectorEngine(data, vectorStyleFromUrl(url, colour), () => {
+    updateUI();
+    render(viewController.getState());
+  });
+  vectorLayers.push(v);
+  if (fit) fitBounds(data.bounds, data.crs);
+  const state = viewController.getState();
+  v.engine.layout(contextFor(state));
+  updateUI();
+  render(state);
+  scheduleRefresh(state);
+  scheduleUrlUpdate();
+  return v;
+}
+
+function removeVectorLayer(id: number): void {
+  const v = vectorLayers.find(l => l.id === id);
+  if (v) v.engine.dispose();
+  vectorLayers = vectorLayers.filter(l => l.id !== id);
+  updateUI();
+  render(viewController.getState());
+  scheduleUrlUpdate();
+}
+
+function clearVectorLayers(): void {
+  for (const v of vectorLayers) v.engine.dispose();
+  vectorLayers = [];
+}
+
+function drawVectors(ctx: RenderContext): void {
+  const dpr = window.devicePixelRatio || 1;
+  overlayCtx.setTransform(1, 0, 0, 1, 0, 0);
+  overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+  overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  for (const v of vectorLayers) v.engine.draw(overlayCtx, ctx);
+}
+
+function vectorItemHtml(v: VectorLayer): string {
+  const d = v.engine.data;
+  const st = v.engine.status();
+  const sty = v.engine.getStyle();
+  const notes = [st.loading ? 'loading' : '', st.coarse ? 'coarse while moving' : ''].filter(Boolean).join(', ');
+  const crs = d.crs.length > 40 ? d.crs.slice(0, 37) + '...' : d.crs;
+  return `
+      <div class="layer-item">
+        <button data-vremove="${v.id}" title="Remove layer">x</button>
+        <button data-vfit="${v.id}" title="Centre the view on this layer">fit</button>
+        <input type="color" class="swatch" data-vcolour="${v.id}" value="${sty.stroke}" title="colour" />
+        <span title="${v.url ?? 'local file'}">${escapeHtml(d.label)}</span>
+        <span>(${d.format}, <span title="${escapeHtml(d.crs)}">${escapeHtml(crs)}</span> ${d.crsOrigin === '[assumed]' ? '[assumed]' : ''})</span>
+      </div>
+      <div class="alpha-row">
+        ${st.features} features, ${st.vertices} vertices; ${st.visible} on the map as ${st.drawnPoints} points${notes ? ` (${notes})` : ''}
+      </div>
+      <div class="alpha-row">
+        alpha <input type="range" min="0" max="1" step="0.02" value="${sty.opacity}" data-valpha="${v.id}" style="width:60px" />
+        fill <input type="range" min="0" max="1" step="0.02" value="${sty.fillOpacity}" data-vfill="${v.id}" style="width:60px" />
+        width <input type="text" class="num tiny" value="${sty.width}" data-vwidth="${v.id}" style="width:32px" />
+      </div>`;
+}
+
+function escapeHtml(t: string): string {
+  return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function setVectorStyle(id: number, partial: Partial<VectorStyle>): void {
+  const v = vectorLayers.find(l => l.id === id);
+  if (!v) return;
+  v.engine.setStyle({ ...v.engine.getStyle(), ...partial });
+  render(viewController.getState());
+  scheduleUrlUpdate();
+}
+
 /**
  * Engines may have to fetch or compute to serve a new view, so that is
  * debounced while the view is still moving.
@@ -805,6 +965,9 @@ function scheduleRefresh(state: ViewState): void {
   updateTimeout = window.setTimeout(() => {
     const ctx = contextFor(state);
     layers.forEach(layer => layer.engine.refresh(ctx));
+    vectorLayers.forEach(v => v.engine.refresh(ctx).then((changed) => {
+      if (changed) { render(viewController.getState()); updateUI(); }
+    }));
     updateTimeout = null;
   }, 150);
 }
@@ -928,6 +1091,7 @@ function render(state: ViewState): void {
     ];
     layers.forEach((layer, i) => layer.engine.drawWireframe(ctx, colors[i % colors.length]));
   }
+  drawVectors(ctx);
   updateInfo(state);
 }
 
@@ -952,7 +1116,7 @@ function updateInfo(state: ViewState): void {
     lines.push(`Centre: ${state.centerX.toFixed(1)}, ${state.centerY.toFixed(1)}`);
     if (wrapWorld) lines.push(currentWrap() ? 'Wrap: repeating the world' : 'Wrap: this projection has no sideways repeat');
   }
-  lines.push(`Layers: ${layers.length}`);
+  lines.push(`Layers: ${layers.length} raster, ${vectorLayers.length} vector`);
   infoEl.innerHTML = lines.join('<br>');
 }
 
@@ -1054,7 +1218,7 @@ function updateUI(): void {
         <span data-alpha-val="${layer.id}">${Math.round(layer.opacity * 100)}%</span>
       </div>${scaleRow}${attr}
     `;
-  }).join('');
+  }).join('') + vectorLayers.map(vectorItemHtml).join('');
   for (const layer of layers) drawHistogram(layer);
 }
 
@@ -1413,7 +1577,13 @@ function viewUrl(withLayers: boolean): string {
   if (warpAlg !== 'bilinear') p.set('alg', warpAlg);
   if (warpScale !== 1) p.set('warpscale', String(warpScale));
   if (warpMaxError !== 0.125) p.set('maxerr', String(warpMaxError));
-  if (withLayers) for (const l of layers) p.append('url', layerUrlWithState(l));
+  if (withLayers) {
+    for (const l of layers) p.append('url', layerUrlWithState(l));
+    for (const v of vectorLayers) {
+      const u = vectorUrlWithState(v);
+      if (u) p.append('url', u);
+    }
+  }
   return `${location.pathname}?${p.toString()}`;
 }
 
@@ -1504,11 +1674,21 @@ async function main() {
   canvas.style.cursor = 'grab';
   container.appendChild(canvas);
 
+  // Vector layers draw here, above the WebGL map; pointer events go through.
+  overlay = document.createElement('canvas');
+  overlay.className = 'overlay';
+  overlay.style.width = '100%';
+  overlay.style.height = '100%';
+  container.appendChild(overlay);
+  overlayCtx = overlay.getContext('2d')!;
+
   function resizeCanvas() {
     const dpr = window.devicePixelRatio || 1;
     const rect = canvas.getBoundingClientRect();
     canvas.width = Math.max(1, Math.round(rect.width * dpr));
     canvas.height = Math.max(1, Math.round(rect.height * dpr));
+    overlay.width = canvas.width;
+    overlay.height = canvas.height;
   }
   resizeCanvas();
   window.addEventListener('resize', () => {
@@ -1544,6 +1724,13 @@ async function main() {
   // Wire up UI
   async function loadOrAdd(url: string, replace: boolean): Promise<void> {
     if (!url) return;
+    // Vector data goes over the map: "load" replaces the vector layers and
+    // leaves the rasters it would be drawn on.
+    if (vectorFormatOf(url)) {
+      if (replace) clearVectorLayers();
+      await addVectorLayer(url);
+      return;
+    }
     if (isCapabilitiesUrl(url) && !splitCapabilitiesUrl(url).layer) {
       try {
         if (await openPicker(splitCapabilitiesUrl(url).url)) return;
@@ -1576,6 +1763,43 @@ async function main() {
   document.getElementById('wmts-add-btn')!.addEventListener('click', async () => {
     await addLayer(pickerSelectionUrl());
   });
+  // Vector samples, files and drops
+  const sampleSelect = document.getElementById('vector-sample') as HTMLSelectElement;
+  for (const [name, sample] of Object.entries(VECTOR_SAMPLES)) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = sample.label;
+    sampleSelect.appendChild(opt);
+  }
+  sampleSelect.addEventListener('change', async () => {
+    const sample = VECTOR_SAMPLES[sampleSelect.value];
+    sampleSelect.value = '';
+    if (sample) await addVectorLayer(sample.url);
+  });
+  const fileInput = document.getElementById('vector-file') as HTMLInputElement;
+  document.getElementById('vector-file-btn')!.addEventListener('click', () => fileInput.click());
+  const addFiles = async (files: FileList | File[]) => {
+    let first = true;
+    for (const f of Array.from(files)) {
+      await addVectorLayer(f, first);
+      first = false;
+    }
+  };
+  fileInput.addEventListener('change', async () => {
+    if (fileInput.files) await addFiles(fileInput.files);
+    fileInput.value = '';
+  });
+  container.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    container.classList.add('dropping');
+  });
+  container.addEventListener('dragleave', () => container.classList.remove('dropping'));
+  container.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    container.classList.remove('dropping');
+    if (e.dataTransfer?.files.length) await addFiles(e.dataTransfer.files);
+  });
+
   urlInput.addEventListener('keypress', (e) => {
     if (e.key === 'Enter') loadBtn.click();
   });
@@ -1649,6 +1873,14 @@ async function main() {
       if (layer) resetScale(layer);
       return;
     }
+    const vrm = t.getAttribute('data-vremove');
+    const vfit = t.getAttribute('data-vfit');
+    if (vrm !== null) { removeVectorLayer(parseInt(vrm)); return; }
+    if (vfit !== null) {
+      const v = vectorLayers.find(l => l.id === parseInt(vfit));
+      if (v) fitBounds(v.engine.data.bounds, v.engine.data.crs);
+      return;
+    }
     if (rm !== null) removeLayer(parseInt(rm));
     if (fit !== null) {
       const layer = layers.find(l => l.id === parseInt(fit));
@@ -1666,6 +1898,14 @@ async function main() {
   });
   layersEl.addEventListener('input', (e) => {
     const t = e.target as HTMLInputElement;
+    const vid = t.getAttribute('data-valpha') ?? t.getAttribute('data-vfill') ?? t.getAttribute('data-vcolour');
+    if (vid !== null) {
+      const id = parseInt(vid);
+      if (t.hasAttribute('data-valpha')) setVectorStyle(id, { opacity: parseFloat(t.value) });
+      else if (t.hasAttribute('data-vfill')) setVectorStyle(id, { fillOpacity: parseFloat(t.value) });
+      else setVectorStyle(id, { stroke: t.value });
+      return;
+    }
     const sid = t.getAttribute('data-shade-strength');
     if (sid !== null) {
       const layer = layers.find(l => l.id === parseInt(sid));
@@ -1693,6 +1933,12 @@ async function main() {
   layersEl.addEventListener('change', async (e) => {
     const t = e.target as HTMLInputElement | HTMLSelectElement;
     const get = (k: string) => t.getAttribute(k);
+    const vw = get('data-vwidth');
+    if (vw !== null) {
+      const w = parseFloat(t.value);
+      if (isFinite(w) && w > 0) setVectorStyle(parseInt(vw), { width: Math.min(20, w) });
+      return;
+    }
     const id = get('data-min') ?? get('data-max') ?? get('data-cmap') ?? get('data-curve') ??
                get('data-nodata') ?? get('data-band') ?? get('data-mode') ??
                get('data-shade') ?? get('data-zf') ?? get('data-az') ?? get('data-alt');
@@ -1761,7 +2007,8 @@ async function main() {
   if (urls.length === 0) urls.push(DEFAULT_COG);
   urlInput.value = urls[0];
   for (const u of urls) {
-    await addLayer(u);
+    if (vectorFormatOf(u)) await addVectorLayer(u);
+    else await addLayer(u);
   }
 
   console.log('Viewer ready!');
