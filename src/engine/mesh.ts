@@ -10,6 +10,10 @@ export interface GridMesh {
   indices: Uint32Array;      // Triangle indices
   vertexCount: number;
   triangleCount: number;
+  /** The grid this was made from, for adaptive refinement (refine.ts). */
+  cols: number;
+  rows: number;
+  bounds: [number, number, number, number];
 }
 
 /**
@@ -79,6 +83,9 @@ export function generateGridMesh(
     texCoords, 
     indices,
     vertexCount: numVertices,
-    triangleCount: numTriangles
+    triangleCount: numTriangles,
+    cols,
+    rows,
+    bounds: [minX, minY, maxX, maxY]
   };
 }

@@ -12,7 +12,8 @@
     "check-worker": "node tools/check-worker-core.mjs && python3 tools/check-worker-core.py",
     "check-warp": "node tools/check-warp.mjs",
     "check-vector": "node tools/check-vector.mjs",
-    "samples": "node tools/make-samples.mjs"
+    "samples": "node tools/make-samples.mjs",
+    "check-mesh": "node tools/check-mesh.mjs"
   },
   "dependencies": {
     "flatgeobuf": "4.6.0",
