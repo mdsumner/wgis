@@ -1,0 +1,210 @@
+/**
+ * Centred-projection view mode.
+ *
+ * In the fixed-extent mode the display CRS is a static thing: we build a mesh
+ * over some extent in it and move a camera around. Here we turn that inside
+ * out. The display CRS is a *template* whose lon_0/lat_0 are the current view
+ * centre, the mesh is always the screen rectangle around (0, 0), and panning
+ * moves the projection centre rather than a camera.
+ *
+ * That gives a few nice properties for free:
+ *   - the screen centre is always the point of zero distortion
+ *   - mesh cells are uniform in screen space, so the linear-interpolation
+ *     error of the UV warp is uniform across the screen at any zoom
+ *   - azimuthal projections (ortho, laea, aeqd, stere) become a globe you can
+ *     spin, with no special-casing of poles or the antimeridian
+ *
+ * The cost is that UVs must be recomputed on every pan, but that is only one
+ * proj4 round trip per mesh vertex per layer.
+ */
+
+import proj4 from 'proj4';
+import { geoTransform } from './transform';
+
+export interface CentredPreset {
+  label: string;
+  template: string;
+}
+
+/**
+ * Templates use {lon_0} and {lat_0} placeholders. Most of these are azimuthal
+ * so that the tangent point is exactly the screen centre; anything with a
+ * centre parameter works (omerc uses lonc, so the placeholder goes there).
+ *
+ * Note: proj4js does not default x_0/y_0 and silently returns NaN without
+ * them, so custom templates must spell out +x_0=0 +y_0=0 too.
+ */
+export const CENTRED_PRESETS: Record<string, CentredPreset> = {
+  ortho: {
+    label: 'Orthographic (globe)',
+    template: '+proj=ortho +lon_0={lon_0} +lat_0={lat_0} +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs'
+  },
+  laea: {
+    label: 'Lambert azimuthal equal area',
+    template: '+proj=laea +lon_0={lon_0} +lat_0={lat_0} +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs'
+  },
+  aeqd: {
+    label: 'Azimuthal equidistant',
+    template: '+proj=aeqd +lon_0={lon_0} +lat_0={lat_0} +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs'
+  },
+  stere: {
+    label: 'Oblique stereographic',
+    template: '+proj=stere +lon_0={lon_0} +lat_0={lat_0} +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs'
+  },
+  gnom: {
+    label: 'Gnomonic',
+    template: '+proj=gnom +lon_0={lon_0} +lat_0={lat_0} +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs'
+  },
+  omerc: {
+    label: 'Oblique Mercator (near north-up)',
+    template: '+proj=omerc +alpha=1 +gamma=2 +lonc={lon_0} +lat_0={lat_0} +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs'
+  },
+  // World projections take only a central meridian, so panning east-west
+  // rotates the globe under a fixed net and panning north-south just moves
+  // the view. The ones proj4js lacks are in projections.ts.
+  sinu: {
+    label: 'World: sinusoidal',
+    template: '+proj=sinu +lon_0={lon_0} +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs'
+  },
+  moll: {
+    label: 'World: Mollweide',
+    template: '+proj=moll +lon_0={lon_0} +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs'
+  },
+  robin: {
+    label: 'World: Robinson',
+    template: '+proj=robin +lon_0={lon_0} +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs'
+  },
+  eqearth: {
+    label: 'World: Equal Earth',
+    template: '+proj=eqearth +lon_0={lon_0} +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs'
+  },
+  eck4: {
+    label: 'World: Eckert IV',
+    template: '+proj=eck4 +lon_0={lon_0} +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs'
+  },
+  natearth: {
+    label: 'World: Natural Earth',
+    template: '+proj=natearth +lon_0={lon_0} +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs'
+  },
+  hammer: {
+    label: 'World: Hammer',
+    template: '+proj=hammer +lon_0={lon_0} +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs'
+  },
+  wintri: {
+    // lat_1 written out on purpose: see projections.ts on what PROJ's CRS
+    // path does with a missing one.
+    label: 'World: Winkel Tripel',
+    template: '+proj=wintri +lat_1=50.46697 +lon_0={lon_0} +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs'
+  },
+  igh: {
+    label: 'World: Goode homolosine (interrupted)',
+    template: '+proj=igh +lon_0={lon_0} +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs'
+  }
+};
+
+/**
+ * Does this template re-centre with the view? A template without {lon_0} or
+ * {lat_0} is an ordinary fixed CRS being used in centred mode: the projection
+ * stays put and only the mesh follows the view centre.
+ */
+export function hasPlaceholders(template: string): boolean {
+  return /\{lon_0\}|\{lat_0\}/.test(template);
+}
+
+export function isPresetName(s: string): boolean {
+  return Object.prototype.hasOwnProperty.call(CENTRED_PRESETS, s);
+}
+
+/**
+ * Resolve a preset name or a raw template to a template string.
+ */
+export function resolveTemplate(presetOrTemplate: string): string {
+  if (isPresetName(presetOrTemplate)) {
+    return CENTRED_PRESETS[presetOrTemplate].template;
+  }
+  return presetOrTemplate;
+}
+
+/**
+ * Wrap a longitude to [-180, 180) and clamp latitude to [-90, 90].
+ */
+export function normaliseLonLat(lon: number, lat: number): [number, number] {
+  let l = ((lon + 180) % 360 + 360) % 360 - 180;
+  const p = Math.max(-90, Math.min(90, lat));
+  return [l, p];
+}
+
+/**
+ * Instantiate a template at a centre. Values are formatted with enough
+ * precision that a re-parse of the string is a no-op.
+ */
+export function centredCRS(template: string, lon: number, lat: number): string {
+  const [l, p] = normaliseLonLat(lon, lat);
+  return template
+    .replace(/\{lon_0\}/g, l.toFixed(8))
+    .replace(/\{lat_0\}/g, p.toFixed(8));
+}
+
+/**
+ * Given a projection centred at (lon, lat), find the lon/lat of the point at
+ * display position (dx, dy). For a re-centring template that position is an
+ * offset from the tangent point; for a static one the caller passes absolute
+ * display coordinates, which works out the same way. This is how a screen pan
+ * becomes a new centre: the point that was under the middle of the screen
+ * after the drag becomes the tangent point of the next frame's projection.
+ *
+ * Returns null if the offset is not on the globe (dragged past the horizon
+ * of an orthographic view, say), in which case the caller should keep the
+ * old centre.
+ */
+/**
+ * panCentre for any executor: the inverse and the round trip are batches
+ * through the display transform of the current centre's CRS.
+ */
+export async function panCentreAsync(
+  template: string,
+  lon: number,
+  lat: number,
+  dx: number,
+  dy: number
+): Promise<[number, number] | null> {
+  if (dx === 0 && dy === 0) return [lon, lat];
+  const geo = geoTransform(centredCRS(template, lon, lat));
+  try {
+    const ll = await geo.toGeo(new Float64Array([dx, dy]));
+    const nlon = ll[0], nlat = ll[1];
+    if (!isFinite(nlon) || !isFinite(nlat)) return null;
+    const b = await geo.fromGeo(new Float64Array([nlon, nlat]));
+    const err = Math.hypot(b[0] - dx, b[1] - dy);
+    const scale = Math.max(1, Math.hypot(dx, dy));
+    if (!isFinite(err) || err > 1e-6 * scale + 1) return null;
+    return normaliseLonLat(nlon, nlat);
+  } catch {
+    return null;
+  }
+}
+
+export function panCentre(
+  template: string,
+  lon: number,
+  lat: number,
+  dx: number,
+  dy: number
+): [number, number] | null {
+  if (dx === 0 && dy === 0) return [lon, lat];
+  const crs = centredCRS(template, lon, lat);
+  const inv = proj4(crs, 'EPSG:4326');
+  const fwd = proj4('EPSG:4326', crs);
+  try {
+    const [nlon, nlat] = inv.forward([dx, dy]);
+    if (!isFinite(nlon) || !isFinite(nlat)) return null;
+    // Reject clamped inverses (beyond the horizon) by round-tripping.
+    const [bx, by] = fwd.forward([nlon, nlat]);
+    const err = Math.hypot(bx - dx, by - dy);
+    const scale = Math.max(1, Math.hypot(dx, dy));
+    if (!isFinite(err) || err > 1e-6 * scale + 1) return null;
+    return normaliseLonLat(nlon, nlat);
+  } catch {
+    return null;
+  }
+}

@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ortho COG Viewer</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        width: 100vw;
+        height: 100vh;
+        overflow: hidden;
+      }
+      #app {
+        width: 100%;
+        height: 100%;
+      }
+      #controls {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        background: rgba(0,0,0,0.8);
+        color: white;
+        padding: 10px;
+        font-family: monospace;
+        font-size: 12px;
+        z-index: 100;
+        max-width: 460px;
+        max-height: calc(100vh - 20px);
+        overflow-y: auto;
+        box-sizing: border-box;
+        border-radius: 4px;
+      }
+      #controls input[type="text"] {
+        width: 280px;
+        padding: 4px;
+        font-family: monospace;
+        font-size: 11px;
+        margin: 5px 0;
+      }
+      #controls input.small {
+        width: 50px;
+      }
+      #controls input.crs {
+        width: 120px;
+      }
+      #controls input.extent {
+        width: 280px;
+      }
+      #vertex-count {
+        color: #aaa;
+        font-size: 10px;
+      }
+      #controls button {
+        padding: 4px 8px;
+        cursor: pointer;
+        font-family: monospace;
+      }
+      #controls label {
+        display: inline-block;
+        width: 45px;
+        text-align: right;
+        margin-right: 4px;
+      }
+      .control-row {
+        margin: 4px 0;
+      }
+      #info {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid #444;
+      }
+      #layers {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid #444;
+      }
+      .layer-item {
+        flex-wrap: wrap;
+      }
+      .alpha-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 1px 0 1px 40px;
+        font-size: 10px;
+        color: #aaa;
+      }
+      .alpha-row input[type="range"] {
+        width: 120px;
+        margin: 0;
+      }
+      .layer-item {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        padding: 2px 0;
+        font-size: 10px;
+      }
+      .layer-item button {
+        padding: 1px 4px;
+        font-size: 10px;
+      }
+      .title-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .title-row a {
+        color: #9cf;
+        font-size: 10px;
+      }
+      .title-row .links {
+        margin-left: auto;
+        display: flex;
+        gap: 4px;
+      }
+      .title-row .links button {
+        font-size: 10px;
+        padding: 1px 5px;
+      }
+      #controls.collapsed fieldset,
+      #controls.collapsed #info {
+        display: none;
+      }
+      #controls select {
+        font-family: monospace;
+        font-size: 11px;
+        padding: 3px;
+        max-width: 280px;
+      }
+      #wmts-layer {
+        max-width: 200px;
+      }
+      #wmts-picker input.small {
+        width: 70px;
+      }
+      #controls input.small {
+        width: 60px;
+      }
+      #controls label.wide {
+        width: auto;
+        text-align: left;
+      }
+      .scale-row {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px 0 2px 40px;
+        font-size: 10px;
+      }
+      .scale-row canvas.hist {
+        width: 200px;
+        height: 36px;
+        border: 1px solid #555;
+        cursor: ew-resize;
+        touch-action: none;
+      }
+      .scale-row .hist-legend {
+        display: inline-block;
+        width: 200px;
+        height: 8px;
+        border: 1px solid #666;
+      }
+      .scale-row label.wide {
+        width: auto;
+        color: #aaa;
+      }
+      #controls .scale-row input.num.tiny {
+        width: 44px;
+      }
+      #controls .scale-row input.num {
+        width: 64px;
+        font-size: 10px;
+        padding: 2px;
+        margin: 0;
+      }
+      .scale-row select {
+        font-size: 10px;
+        padding: 1px;
+        max-width: 110px;
+      }
+      .scale-row button {
+        font-size: 10px;
+        padding: 1px 4px;
+      }
+      .attribution {
+        color: #888;
+        font-size: 9px;
+        padding-left: 40px;
+      }
+      .hint {
+        color: #aaa;
+        font-size: 10px;
+      }
+      .crs-string {
+        display: inline-block;
+        max-width: 380px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        vertical-align: bottom;
+      }
+      #info {
+        user-select: text;
+      }
+      fieldset {
+        border: 1px solid #444;
+        padding: 6px;
+        margin: 6px 0;
+      }
+      legend {
+        padding: 0 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="controls">
+      <div class="title-row">
+        <strong>Ortho COG Viewer</strong>
+        <a href="https://github.com/mdsumner/ortho-cog-viewer" target="_blank" rel="noopener">source</a>
+        <span class="links">
+          <button id="link-btn" title="Put a link to this view, layers and all, in the address bar and on the clipboard">link</button>
+          <button id="reset-btn" title="Start again with the defaults">reset</button>
+          <button id="panel-toggle" title="Collapse/expand panel">_</button>
+        </span>
+      </div>
+      
+      <fieldset>
+        <legend>Display</legend>
+        <div class="control-row">
+          <label>Mode:</label>
+          <select id="mode">
+            <option value="fixed">fixed extent</option>
+            <option value="centred">centred projection</option>
+          </select>
+        </div>
+        <div id="fixed-panel">
+          <div class="control-row">
+            <label>CRS:</label>
+            <input type="text" id="display-crs" class="crs" value="EPSG:3857" />
+          </div>
+          <div class="control-row">
+            <label>Extent:</label>
+            <input type="text" id="extent" class="extent" value="-40000000,40000000,-40000000,40000000" />
+          </div>
+        </div>
+        <div id="centred-panel" hidden>
+          <div class="control-row">
+            <label>Proj:</label>
+            <select id="proj"></select>
+          </div>
+          <div class="control-row">
+            <label></label>
+            <input type="text" id="proj-template" class="extent" hidden
+                   placeholder="+proj=... +lon_0={lon_0} +lat_0={lat_0} +x_0=0 +y_0=0 +ellps=WGS84 +units=m" />
+          </div>
+          <div class="control-row">
+            <label>Centre:</label>
+            <input type="text" id="centre-lon" class="small" value="0" title="longitude" />
+            <input type="text" id="centre-lat" class="small" value="-90" title="latitude" />
+            <span class="hint">lon, lat (drag the map to move it; shift-drag looks around without re-centring)</span>
+          </div>
+          <div class="control-row">
+            <label for="recentre">Re-centre:</label>
+            <select id="recentre" title="when a drag moves the projection centre">
+              <option value="auto">auto (live on proj4js, on release on PROJ)</option>
+              <option value="live">live, while dragging</option>
+              <option value="release">on release</option>
+            </select>
+          </div>
+        </div>
+        <div class="control-row">
+          <label for="engine">Engine:</label>
+          <select id="engine" title="mesh: GPU-interpolated texture, free while panning; warp: every screen pixel resampled by rwarp in a worker">
+            <option value="mesh">mesh (GPU interpolation)</option>
+            <option value="warp">warp (rwarp resampling)</option>
+          </select>
+          <select id="warp-alg" title="resampling kernel for the warp engine">
+            <option value="nearest">nearest</option>
+            <option value="bilinear" selected>bilinear</option>
+            <option value="cubic">cubic</option>
+            <option value="lanczos">lanczos</option>
+          </select>
+          <input type="number" id="warp-scale" class="small" value="1" min="0.1" max="2" step="0.1" title="warp pixels per screen pixel; 0.5 is four times faster" />
+        </div>
+        <div class="control-row">
+          <label>Grid:</label>
+          <input type="number" id="grid-size" class="small" value="64" min="4" max="256" />
+          <span id="vertex-count">(4225 verts)</span>
+          <button id="apply-crs-btn">Apply</button>
+        </div>
+        <div class="control-row">
+          <label></label>
+          <input type="checkbox" id="graticule" checked />
+          <label for="graticule" class="wide">graticule</label>
+          <input type="checkbox" id="wireframe" />
+          <label for="wireframe" class="wide">show triangles</label>
+          <input type="checkbox" id="wrap" />
+          <label for="wrap" class="wide" title="repeat the world sideways, where the projection has a repeat">wrap</label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Layers</legend>
+        <input type="text" id="cog-url" placeholder="COG URL, {z}/{x}/{y} template, or WMTS GetCapabilities URL" />
+        <button id="load-btn">Load</button>
+        <button id="add-btn">Add</button>
+        <div class="control-row">
+          <label>Preset:</label>
+          <select id="tile-preset"><option value="">presets...</option></select>
+        </div>
+        <div id="wmts-picker" hidden>
+          <div class="control-row">
+            <label>Layer:</label>
+            <input type="text" id="wmts-filter" class="small" placeholder="filter" />
+            <select id="wmts-layer"></select>
+          </div>
+          <div class="control-row">
+            <label>Matrix:</label>
+            <select id="wmts-tms"></select>
+          </div>
+          <div class="control-row" id="wmts-time-row" hidden>
+            <label>Time:</label>
+            <input type="text" id="wmts-time" class="crs" />
+            <span class="hint" id="wmts-time-hint"></span>
+          </div>
+          <div class="control-row">
+            <label></label>
+            <button id="wmts-load-btn">Load</button>
+            <button id="wmts-add-btn">Add</button>
+            <span class="hint" id="wmts-count"></span>
+          </div>
+        </div>
+        <div id="layers"></div>
+      </fieldset>
+      
+      <div id="info"></div>
+    </div>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
