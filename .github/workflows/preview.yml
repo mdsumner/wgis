@@ -1,0 +1,43 @@
+name: Preview pull request
+
+# Each pull request is built and published to
+# https://mdsumner.github.io/wgis/pr-preview/pr-<number>/ on the gh-pages
+# branch, with a comment on the PR linking it. Closing the PR removes it.
+# The build uses relative paths (vite base './'), so it works from a
+# subfolder as it is.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: preview-${{ github.event.number }}
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        if: github.event.action != 'closed'
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        if: github.event.action != 'closed'
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        if: github.event.action != 'closed'
+      - run: pnpm build
+        if: github.event.action != 'closed'
+      - uses: rossjrw/pr-preview-action@v1
+        with:
+          source-dir: ./dist
+          preview-branch: gh-pages
+          umbrella-dir: pr-preview
