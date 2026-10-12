@@ -26,7 +26,7 @@
         top: 0;
         pointer-events: none;
       }
-      #edit-hint {
+      #edit-hint, #start-hint {
         position: absolute;
         left: 50%;
         bottom: 14px;
@@ -168,6 +168,7 @@
         padding: 1px 5px;
       }
       #controls.collapsed fieldset,
+      #controls.collapsed details,
       #controls.collapsed #info {
         display: none;
       }
@@ -260,6 +261,152 @@
       legend {
         padding: 0 4px;
       }
+      details.fold {
+        border: 1px solid #444;
+        padding: 4px 6px;
+        margin: 6px 0;
+      }
+      details.fold > summary {
+        cursor: pointer;
+        color: #ccc;
+      }
+      details.fold[open] > summary {
+        margin-bottom: 4px;
+      }
+
+      /* The top bar: scope, CRS and background, each a chip. */
+      #topbar {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        max-width: calc(100vw - 20px);
+        gap: 6px;
+        align-items: center;
+        z-index: 90;
+        font: 12px sans-serif;
+      }
+      #topbar .chip, #topbar select.chip {
+        background: rgba(0, 0, 0, 0.75);
+        color: #eee;
+        border: 1px solid #555;
+        border-radius: 12px;
+        padding: 4px 10px;
+        font: 12px sans-serif;
+        cursor: pointer;
+        max-width: 240px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #topbar .chip:hover { border-color: #9cf; }
+      #topbar .chip.suggest {
+        border-color: #9cf;
+        color: #9cf;
+      }
+
+      /* The start card: how much of the Earth? */
+      body.starting #controls,
+      body.starting #topbar {
+        display: none;
+      }
+      #start-card {
+        position: absolute;
+        right: 24px;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 400px;
+        max-width: calc(100vw - 32px);
+        max-height: calc(100vh - 32px);
+        overflow-y: auto;
+        background: rgba(12, 14, 18, 0.88);
+        color: #eee;
+        border: 1px solid #444;
+        border-radius: 10px;
+        padding: 16px;
+        font: 13px sans-serif;
+        z-index: 110;
+      }
+      #start-card h1 {
+        font-size: 18px;
+        margin-bottom: 2px;
+      }
+      #start-card .q {
+        color: #aaa;
+        margin-bottom: 12px;
+      }
+      #start-card .door {
+        border: 1px solid #444;
+        border-radius: 8px;
+        padding: 8px 10px;
+        margin-bottom: 8px;
+      }
+      #start-card .door > button.main {
+        all: unset;
+        cursor: pointer;
+        display: block;
+        width: 100%;
+      }
+      #start-card .door b {
+        font-size: 14px;
+      }
+      #start-card .door .sub {
+        color: #aaa;
+        font-size: 12px;
+      }
+      #start-card .door:hover {
+        border-color: #9cf;
+      }
+      #start-card .row {
+        display: flex;
+        gap: 6px;
+        margin-top: 6px;
+        flex-wrap: wrap;
+      }
+      #start-card .row button, #start-card .row input {
+        font: 12px sans-serif;
+        padding: 3px 8px;
+      }
+      #start-card .row input {
+        flex: 1;
+        min-width: 140px;
+      }
+      #start-card .msg {
+        color: #fc6;
+        font-size: 12px;
+        margin-top: 4px;
+      }
+      #start-card .places button {
+        display: block;
+        width: 100%;
+        text-align: left;
+        margin-top: 3px;
+        font: 11px sans-serif;
+        padding: 3px 6px;
+      }
+      #start-card .foot {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 4px;
+        font-size: 12px;
+      }
+      #start-card .foot a {
+        color: #9cf;
+        cursor: pointer;
+      }
+      @media (max-width: 640px) {
+        #start-card {
+          right: 16px;
+          left: 16px;
+          top: auto;
+          bottom: 16px;
+          transform: none;
+          width: auto;
+          max-height: 60vh;
+        }
+      }
     </style>
   </head>
   <body>
@@ -274,8 +421,8 @@
         </span>
       </div>
       
-      <fieldset>
-        <legend>Display</legend>
+      <details id="view-details" class="fold">
+        <summary>View settings</summary>
         <div class="control-row">
           <label>Mode:</label>
           <select id="mode">
@@ -346,8 +493,10 @@
           <label for="wireframe" class="wide">show triangles</label>
           <input type="checkbox" id="wrap" />
           <label for="wrap" class="wide" title="repeat the world sideways, where the projection has a repeat">wrap</label>
+          <input type="checkbox" id="coastline" checked />
+          <label for="coastline" class="wide" title="Natural Earth 1:50m coastline, drawn in any CRS with nothing to download">coastline</label>
         </div>
-      </fieldset>
+      </details>
 
       <fieldset>
         <legend>Layers</legend>
@@ -390,8 +539,8 @@
         <div id="layers"></div>
       </fieldset>
 
-      <fieldset>
-        <legend>Edit</legend>
+      <details id="edit-details" class="fold">
+        <summary>Edit</summary>
         <div class="control-row edit-modes">
           <button data-emode="pan" title="drag to pan (every mode pans with a drag)">pan</button>
           <button data-emode="select" title="click to select, shift-click to add, drag to move">select</button>
@@ -418,11 +567,68 @@
         </div>
         <div id="edit-status" class="hint"></div>
         <div id="edit-props"></div>
-      </fieldset>
+      </details>
       
       <div id="info"></div>
     </div>
-    <div id="app"><div id="edit-hint" hidden></div></div>
+    <div id="topbar">
+      <button id="scope-chip" class="chip" title="How much of the Earth: choose again">scope</button>
+      <button id="crs-chip" class="chip" title="The map's CRS: open the view settings">crs</button>
+      <select id="bg-chip" class="chip" title="Background">
+        <option value="esri">Esri imagery</option>
+        <option value="gebco">GEBCO bathymetry</option>
+        <option value="osm">OpenStreetMap</option>
+        <option value="none">no background</option>
+      </select>
+      <button id="switch-chip" class="chip suggest" hidden></button>
+    </div>
+    <div id="start-card" hidden>
+      <h1>wgis</h1>
+      <div class="q">How much of the Earth are you working with?</div>
+      <div class="door">
+        <button class="main" data-door="global"><b>Global</b>
+          <div class="sub">Equal Earth, centred where the globe is facing; drag to turn it</div></button>
+      </div>
+      <div class="door">
+        <button class="main" data-door="hemi-here"><b>Hemispheric</b>
+          <div class="sub">A globe; drag to turn it. GEBCO near the poles</div></button>
+        <div class="row">
+          <button data-door="hemi-north">North pole</button>
+          <button data-door="hemi-south">South pole</button>
+          <button data-door="hemi-here">this side</button>
+        </div>
+      </div>
+      <div class="door">
+        <div><b>Local</b>
+          <div class="sub">UTM zone of the place (MGA, ETRS89, NAD83 where they apply), over imagery</div></div>
+        <form class="row" id="start-place-form">
+          <input type="text" id="start-place" placeholder="place, address, lon lat, or E N z55" />
+          <button type="submit">go</button>
+        </form>
+        <div class="row">
+          <button data-door="local-pick">pick on the globe</button>
+          <button data-door="local-me">use my location</button>
+        </div>
+        <div class="places" id="start-places"></div>
+        <div class="msg" id="start-msg"></div>
+      </div>
+      <div class="door">
+        <div><b>Open data</b>
+          <div class="sub">The map opens in the layer's own CRS. Or drop files anywhere</div></div>
+        <form class="row" id="start-url-form">
+          <input type="text" id="start-url" placeholder="COG, tiles, WMTS, .geojson/.fgb/.parquet URL" />
+          <button type="submit">open</button>
+        </form>
+        <div class="row">
+          <button data-door="data-file">open a file</button>
+        </div>
+      </div>
+      <div class="foot">
+        <a id="start-continue" hidden>Continue where you were</a>
+        <a id="start-close" hidden>close</a>
+      </div>
+    </div>
+    <div id="app"><div id="edit-hint" hidden></div><div id="start-hint" class="hint-bubble" hidden></div></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
