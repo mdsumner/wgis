@@ -7,3 +7,5 @@ dist/
 public/proj-wasm/
 public/worker-smoke/
 public/rwarp/
+# roborev snapshots
+/.roborev/

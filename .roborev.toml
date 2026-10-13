@@ -1,0 +1,72 @@
+agent = "claude-code"
+
+guidelines = """
+wgis is a browser GIS where every layer keeps its own CRS and the map is
+drawn in any CRS. Review against docs/foundations.md (design calls A-H)
+and the README. The checks under tools/ are the ground truth for the
+hard parts; a change in the area a check covers needs a case in that
+check, not a comment saying it was tested by hand.
+
+Invariants (a change that breaks one is a blocking finding):
+
+- Call B: a vector layer's coordinates are stored in the layer's CRS and
+  never rewritten into the display CRS or into lon/lat. Flag any path
+  that stores projected or lon/lat coordinates into a layer whose CRS
+  says otherwise, and any reader that assumes lon/lat without marking the
+  layer as [assumed].
+- Call C: an edge is straight in the layer CRS and is densified for
+  display by halving until the projected midpoint is within the screen
+  tolerance of the chord (src/vector/densify.ts). Breaks in the display
+  projection (globe horizon, antimeridian of a world projection) cut
+  lines; they are never crossed. Paste between CRSs uses the same
+  machinery so shape is kept (src/vector/reproject.ts).
+- The editor works in the layer CRS: a click goes display -> lon/lat ->
+  layer CRS and is stored there (src/edit/). Pointer-to-layer-CRS must
+  stay one function. Features are never changed in place; undo holds
+  whole feature arrays.
+- Display is independent of source: nothing may assume Web Mercator or
+  lon/lat as the map CRS. Fixed and centred view modes both have to
+  keep working; centred has no pole or antimeridian special cases.
+- The LayerEngine seam (src/engine/types.ts: layout / refresh / draw)
+  separates engines from the shell. Do not let main.ts reach into an
+  engine's internals, and do not add a third engine without implementing
+  the seam.
+- proj4js is for per-vertex transforms; PROJ (proj-wasm) is for CRS
+  resolution and checking. Do not move hot per-vertex work onto
+  proj-wasm, and do not resolve CRSs by hand-written tables.
+- No server in the core (call H): static hosting only. Anything that
+  needs a proxy or a service is optional and must degrade without it.
+- Whole-file vector reads are a known limit, not a bug; do not report
+  them unless the change claims to fix them.
+
+Checks and what they cover:
+
+- pnpm check-vector: readers, densification against PROJ, paste, saves,
+  vertex edits. Any change to src/vector/ or src/edit/geom.ts needs a
+  case here.
+- pnpm check-warp: raster warp. Any change to src/core/warp.ts or the
+  warp engine/worker.
+- pnpm check-mesh: the display mesh at the edge of the map, plain versus
+  refined (src/engine/refine.ts, mesh.ts, uv.ts).
+- pnpm check-crs: the CRS resolution chain against PROJ (src/core/crs.ts,
+  projwasm.ts).
+- pnpm samples regenerates public/samples/; a reader change that alters
+  what the samples mean must regenerate them.
+
+Also flag:
+
+- Edits to src/core/ or src/engine/ that are not marked as deliberate
+  divergence from ortho-cog-viewer (those directories were copied in at
+  3e00588 and are meant to track it).
+- Hand-typed geometry in code or samples; samples come from
+  tools/make-samples.mjs.
+- Non-ASCII characters in source, tools, samples or generated files.
+- New runtime dependencies. The dependency list is short on purpose;
+  a new one needs a stated reason in the commit or PR.
+- URL and link state: the shareable link must round-trip. A new piece of
+  view or layer state either goes in the link or is documented as
+  this-page-only, as local files are.
+
+Keep findings concrete: name the file and the invariant, and say which
+check would catch it. Do not report style or formatting.
+"""
