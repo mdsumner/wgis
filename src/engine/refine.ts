@@ -1,4 +1,7 @@
 /**
+ * wgis divergence from ortho-cog-viewer: this file is wgis's own (d352f7e,
+ * f8c55a6), with hooks in mesh.ts, meshEngine.ts and types.ts.
+ *
  * Adaptive refinement of the display mesh, where a regular grid is not
  * enough: at the edge of the map, round a pole in a periodic texture, and
  * where the projection curves too hard for linear interpolation.

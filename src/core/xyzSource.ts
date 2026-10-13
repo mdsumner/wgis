@@ -56,6 +56,8 @@ export interface TilePreset {
 }
 
 export const TILE_PRESETS: Record<string, TilePreset> = {
+  // wgis divergence from ortho-cog-viewer (b61dc1a): the two GEBCO presets point at GEBCO 2026;
+  // the keys stay gebco-2024 so existing links keep working.
   'gebco-2024': {
     label: 'GEBCO 2026 bathymetry, hillshaded (COG, source.coop)',
     template: 'https://data.source.coop/ausantarctic/gebco/GEBCO_2026.tif#cmap=bathy&curve=sqrt&shade=0.7&zf=8',
@@ -112,6 +114,7 @@ export const TILE_PRESETS: Record<string, TilePreset> = {
     scheme: 'GIBS4326_250m',
     attribution: 'NASA GIBS'
   },
+  // wgis divergence from ortho-cog-viewer (141201d): Blue Marble, a preset here only.
   'bluemarble-2004': {
     label: 'NASA Blue Marble January 2004 (GeoTIFF, not a COG)',
     template: 'https://assets.science.nasa.gov/content/dam/science/esd/eo/images/bmng/bmng-base/january/world.200401.3x5400x2700_geo.tif',

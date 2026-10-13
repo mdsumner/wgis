@@ -55,6 +55,7 @@ export interface RenderContext {
   /**
    * Once the view settles, refine the grid where it is not good enough
    * (the edge of the map, poles, strong curvature): engine/refine.ts.
+   * wgis divergence from ortho-cog-viewer (d352f7e).
    */
   refine?: boolean;
 }

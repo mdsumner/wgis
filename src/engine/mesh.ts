@@ -10,7 +10,10 @@ export interface GridMesh {
   indices: Uint32Array;      // Triangle indices
   vertexCount: number;
   triangleCount: number;
-  /** The grid this was made from, for adaptive refinement (refine.ts). */
+  /**
+   * The grid this was made from, for adaptive refinement (refine.ts).
+   * wgis divergence from ortho-cog-viewer (d352f7e).
+   */
   cols: number;
   rows: number;
   bounds: [number, number, number, number];

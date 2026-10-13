@@ -345,6 +345,7 @@ export function registerExtraProjections(): void {
   }).Proj.projections;
   for (const p of EXTRA_PROJECTIONS) store.add(p);
 
+  // wgis divergence from ortho-cog-viewer (f8c55a6).
   // proj4js's oblique Mercator forward takes lon - lam0 as given, without
   // bringing it into [-180, 180] as PROJ does, and its sin(B * lon) is not
   // periodic when B != 1 (the ellipsoid). So a longitude more than 180
