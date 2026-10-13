@@ -34,6 +34,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as proj from 'proj-wasm';
+import { parquetWriteBuffer } from 'hyparquet-writer';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const require = createRequire(import.meta.url);
@@ -98,6 +99,25 @@ const kinds = (d) => d.features.map((f) => f.kind).join(',');
   const fc = { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [147, -42] } }] };
   const d = await wgis.readVectorFile(new File([JSON.stringify(fc)], 'plain.geojson'));
   check(d.crs === 'EPSG:4326' && d.crsOrigin === '[assumed]', 'GeoJSON: no crs member is lon/lat, marked assumed');
+}
+{
+  // Parquet's own GEOMETRY type can give its CRS as projjson:<key>, the
+  // PROJJSON being in the file's key-value metadata under that key. (The
+  // writer encodes a GEOMETRY column's GeoJSON as WKB itself.)
+  const parquet = (crs, kv) => new File([parquetWriteBuffer({
+    columnData: [{ name: 'geometry', data: [{ type: 'Point', coordinates: [0, -2000000] }] }],
+    schema: [
+      { name: 'root', num_children: 1 },
+      { name: 'geometry', type: 'BYTE_ARRAY', repetition_type: 'OPTIONAL', logical_type: { type: 'GEOMETRY', crs } }
+    ],
+    kvMetadata: kv
+  })], 'native.parquet');
+  const projjson = { type: 'ProjectedCRS', name: 'WGS 84 / Antarctic Polar Stereographic', id: { authority: 'EPSG', code: 3031 } };
+  const d = await wgis.readVectorFile(parquet('projjson:my_crs', [{ key: 'my_crs', value: JSON.stringify(projjson) }]));
+  check(d.crs === 'EPSG:3031' && d.crsOrigin === 'geoparquet header' && d.features[0].parts[0][1] === -2000000,
+    `GeoParquet: GEOMETRY crs projjson:<key> read from the metadata (${d.crs}, ${d.crsOrigin})`);
+  const missing = await wgis.readVectorFile(parquet('projjson:nowhere', [])).then(() => 'read', (e) => e.message);
+  check(/no nowhere metadata/.test(missing), `GeoParquet: projjson:<key> with no such key is refused (${missing})`);
 }
 
 // --- 2. Densification against PROJ ------------------------------------------

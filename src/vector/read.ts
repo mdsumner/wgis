@@ -235,7 +235,14 @@ async function readGeoParquet(file: AsyncBuffer): Promise<Parsed> {
     if (!el) throw new Error('No geometry column: neither GeoParquet metadata nor a GEOMETRY column');
     column = el.name;
     const lt = el.logical_type as { crs?: string };
-    crs = lt.crs ? (lt.crs.startsWith('projjson:') ? null : lt.crs) : 'EPSG:4326';
+    if (!lt.crs) crs = 'EPSG:4326';
+    else if (lt.crs.startsWith('projjson:')) {
+      // The PROJJSON is in the file's key-value metadata, under this key.
+      const key = lt.crs.slice('projjson:'.length);
+      const value = metadata.key_value_metadata?.find((kv: { key: string }) => kv.key === key)?.value;
+      if (!value) throw new Error(`GEOMETRY column ${column} gives its CRS as ${lt.crs}, and the file has no ${key} metadata`);
+      crs = projjsonCRS(JSON.parse(value));
+    } else crs = lt.crs;
   }
 
   const rows = await parquetReadObjects({ file, metadata });
