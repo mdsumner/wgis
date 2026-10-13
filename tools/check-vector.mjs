@@ -27,6 +27,11 @@
 // 5. Vertex edits: moving, adding and removing vertices keep rings closed
 //    and refuse to make a ring or line too small.
 //
+// 6. The fixed-view extent around a layer (start/scopes.ts): lon/lat and
+//    Web Mercator are told apart by their definitions as PROJ resolves
+//    them, not by the digits of the code, so any geographic CRS gets a
+//    span in degrees kept inside the world.
+//
 //   node tools/check-vector.mjs
 import { build } from 'esbuild';
 import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -60,7 +65,8 @@ writeFileSync(entry, [
   "export * from './src/core/crs';",
   "export * from './src/vector/reproject';",
   "export * from './src/vector/write';",
-  "export * as geom from './src/edit/geom';"
+  "export * as geom from './src/edit/geom';",
+  "export * as scopes from './src/start/scopes';"
 ].join('\n') + '\n');
 try {
   await build({ entryPoints: [entry], bundle: true, format: 'cjs', platform: 'node', outfile: bundle, logLevel: 'error' });
@@ -384,6 +390,40 @@ for (const c of cases) {
   check(g.deleteVertex(g.sketchFeature('point', [1, 2]), 0, 0) === null, 'removing a single point removes the feature');
   const t = g.translate(tri, 5, 5);
   check(t.parts[0].join() === '5,5,15,5,5,15,5,5', 'a moved feature moves every vertex by the same amount in its CRS');
+}
+
+// --- 6. Fixed-view extent ------------------------------------------------------
+
+{
+  // Codes nothing built in knows are resolved by PROJ, as the page does
+  // (core/projwasm.ts), so the definitions are the ones the page would see.
+  wgis.setDefinitionProvider(async (code) => {
+    try {
+      const pj = await proj.projCreate({ context: ctx, definition: code });
+      const s = await proj.projAsProjString({ context: ctx, pj, type: proj.PJ_PROJ_4 });
+      return s.replace(/\s*\+type=crs\b/, '').trim() || null;
+    } catch {
+      return null;
+    }
+  });
+  const at = (x, y) => ({ minX: x, maxX: x, minY: y, maxY: y });
+  const span = (e) => `${+(e.maxX - e.minX).toFixed(3)} x ${+(e.maxY - e.minY).toFixed(3)}`;
+  for (const [crs, b, wantW] of [
+    ['EPSG:4326', at(147, -42), 0.4],
+    ['EPSG:4258', at(10, 50), 0.4],     // ETRS89, not in the built-in table
+    ['EPSG:4167', at(174, -41), 0.4],   // NZGD2000
+    ['+proj=longlat +ellps=GRS80 +no_defs', at(10, 50), 0.4],
+    ['EPSG:28355', at(500000, 5250000), 40000],
+    ['EPSG:3031', at(0, -2000000), 40000]
+  ]) {
+    check(await wgis.resolveCRS(crs), `${crs} resolves`);
+    const e = wgis.scopes.paddedExtent(b, crs);
+    check(Math.abs(e.maxX - e.minX - wantW) < 1e-9, `extent around a point in ${crs}: ${span(e)}, wanted ${wantW} wide`);
+  }
+  const lonlatEdge = wgis.scopes.paddedExtent(at(179.95, 89.95), 'EPSG:4258');
+  check(lonlatEdge.maxX <= 180 && lonlatEdge.maxY <= 90, `a geographic extent stays inside the world (${lonlatEdge.maxX}, ${lonlatEdge.maxY})`);
+  const merc = wgis.scopes.paddedExtent({ minX: 19000000, maxX: 20000000, minY: 0, maxY: 1000000 }, 'EPSG:3857');
+  check(merc.maxX <= 20037508.35, `a Web Mercator extent stays inside the world (${merc.maxX})`);
 }
 
 await proj.shutdown();
