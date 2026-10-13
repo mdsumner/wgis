@@ -81,7 +81,10 @@ picked with "open file", or files dropped on the map.
   horizon of a globe and are cut at the antimeridian of a world
   projection instead of crossing it.
 - Vector layers go in the shareable link (the "link" button) with their
-  colour, opacity and fill. Local files cannot.
+  colour, opacity, fill and line width. What a link cannot carry is this
+  page's only: local files, temporary layers (drawn, pasted or made with
+  "new layer") are left out, and a layer opened from a URL goes in as that
+  URL, so its unsaved edits are not in the link. Save them to keep them.
 
 **Drawing and editing**, in each layer's own CRS (the Edit panel):
 
@@ -139,6 +142,9 @@ when the PR closes.)
 - Vectors are drawn with Canvas 2D. Layers over 5,000 vertices are thinned
   while the view moves and redrawn in full when it settles.
 - GeoParquet geometry must be WKB (not the native GeoArrow encodings).
+- GeoParquet with spherical edges (`edges` in the metadata, or Parquet's
+  GEOGRAPHY type) is refused: edges are straight in the layer CRS, and a
+  geodesic edge option is still to do.
 - No styling by attribute, and no identify beyond selecting.
 - Editing: no snapping, no holes or multi-part drawing (they survive
   editing when they come from a file), and temporary layers live only in
@@ -179,7 +185,8 @@ vertex edits are checked to keep rings closed.
     src/vector/vectorEngine.ts  layout / refresh / draw on a 2D canvas, hit testing
     src/vector/reproject.ts  features into another CRS, keeping their shape
     src/vector/write.ts      FlatGeobuf and GeoJSON out
-    src/edit/editor.ts       modes, pointer, undo, copy and paste
+    src/edit/editor.ts       modes, undo, copy and paste
+    src/edit/pointer.ts      the pointer in a layer's CRS (screen -> display -> lon/lat -> layer)
     src/edit/geom.ts         vertex edits on one feature
     src/start/scopes.ts      global / hemispheric / local / data: CRS and background defaults
     src/start/locate.ts      typed places and coordinates, device location

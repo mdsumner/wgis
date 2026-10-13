@@ -16,26 +16,20 @@
  *              palettes, hillshade, nodata and alpha are identical
  */
 import { MeshRenderer } from './MeshRenderer';
-import { LayerEngine, RenderContext, Style, EngineStatus, View } from './types';
+import { LayerEngine, RenderContext, Style, EngineStatus, View, WarpOptions } from './types';
 import { RasterSource, FloatStats, planFetch } from '../core/source';
 import { SourceBounds } from '../core/bounds';
 import { colormapBytes } from '../core/colormap';
 import { crsDefinition } from '../core/crs';
 import { geoTransform } from '../core/transform';
-import { ResampleAlg, WarpJob } from '../core/warp';
+import { WarpJob } from '../core/warp';
 import { warpInWorker, WarpOutcome } from './warpClient';
 import proj4 from 'proj4';
 
 const MAX_TEXTURE_DIM = 4096;
 
-export interface WarpOptions {
-  alg: ResampleAlg;
-  /** warp pixels per screen pixel: 1 is exact, 0.5 is four times faster */
-  scale: number;
-  prefer: 'rwarp' | 'reference';
-  /** approximate-transformer threshold in source pixels; 0 is exact */
-  maxError: number;
-}
+// wgis divergence from ortho-cog-viewer: WarpOptions lives in types.ts, and
+// the caption line is status().detail, so the shell need not know this class.
 
 /** The rectangle a warp was made for, in its display CRS. */
 interface WarpRect { crs: string; minX: number; minY: number; maxX: number; maxY: number; }
@@ -253,12 +247,13 @@ export class WarpEngine implements LayerEngine {
       level: this.level,
       textureSize: this.texSize,
       validFraction: this.hasTexture ? 1 : 0,
-      stats: this.stats
+      stats: this.stats,
+      detail: this.describe()
     };
   }
 
   /** A line for the layer's caption: which backend, how long, or why not. */
-  describe(): string {
+  private describe(): string {
     if (this.lastError) return `warp: ${this.lastError}`;
     const o = this.lastOutcome;
     if (!o) return this.loading ? 'warp: working...' : 'warp: not yet';

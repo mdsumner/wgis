@@ -34,9 +34,9 @@ import { transformBounds, boundsToDisplayAsync, SourceBounds } from './core/boun
 import { WrapSpec, detectWrap, detectWrapAsync, copyIndex } from './core/wrap';
 import { ViewController, ViewState } from './ViewController';
 import { CENTRED_PRESETS, centredCRS, isPresetName, panCentre, panCentreAsync, resolveTemplate, normaliseLonLat } from './core/centred';
-import { LayerEngine, RenderContext, Style, View, Curve, defaultStyle } from './engine/types';
+import { LayerEngine, RenderContext, Style, View, Curve, WarpOptions, defaultStyle } from './engine/types';
 import { MeshEngine } from './engine/meshEngine';
-import { WarpEngine, WarpOptions } from './engine/warpEngine';
+import { WarpEngine } from './engine/warpEngine';
 import { ResampleAlg } from './core/warp';
 import { VectorEngine, VectorStyle, defaultVectorStyle } from './vector/vectorEngine';
 import { readVectorUrl, readVectorFile, vectorFormatOf } from './vector/read';
@@ -344,7 +344,7 @@ function rebuildEngines(): void {
   const ctx = contextFor(viewController.getState());
   for (const layer of layers) {
     if (layer.engine.kind === engineKind) {
-      if (layer.engine instanceof WarpEngine) layer.engine.setOptions(warpOptions());
+      layer.engine.setOptions?.(warpOptions());
     } else {
       layer.engine.dispose();
       layer.engine = makeEngine(layer);
@@ -980,8 +980,8 @@ function drawVectors(ctx: RenderContext): void {
   overlayCtx.setTransform(1, 0, 0, 1, 0, 0);
   overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
   overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  if (coastline && showCoastline) coastline.draw(overlayCtx, ctx);
-  for (const v of vectorLayers) v.engine.draw(overlayCtx, ctx);
+  if (coastline && showCoastline) coastline.draw(ctx, overlayCtx);
+  for (const v of vectorLayers) v.engine.draw(ctx, overlayCtx);
   editor?.draw(overlayCtx, ctx);
 }
 
@@ -1467,7 +1467,7 @@ function updateUI(): void {
         <button data-fit="${layer.id}" title="Centre the view on this layer">fit</button>
         <span title="${layer.url}">${src.label}</span>
         <span>(${src.kind} ${src.crs}, ${lvl}${loading}, ${pct}% on-globe)</span>
-      </div>${layer.engine instanceof WarpEngine ? `<div class="alpha-row">${layer.engine.describe()}</div>` : ''}
+      </div>${st8.detail ? `<div class="alpha-row">${st8.detail}</div>` : ''}
       <div class="alpha-row">
         alpha <input type="range" min="0" max="1" step="0.02" value="${layer.opacity}" data-alpha="${layer.id}" />
         <span data-alpha-val="${layer.id}">${Math.round(layer.opacity * 100)}%</span>
