@@ -185,7 +185,8 @@ vertex edits are checked to keep rings closed.
     src/vector/vectorEngine.ts  layout / refresh / draw on a 2D canvas, hit testing
     src/vector/reproject.ts  features into another CRS, keeping their shape
     src/vector/write.ts      FlatGeobuf and GeoJSON out
-    src/edit/editor.ts       modes, pointer, undo, copy and paste
+    src/edit/editor.ts       modes, undo, copy and paste
+    src/edit/pointer.ts      the pointer in a layer's CRS (screen -> display -> lon/lat -> layer)
     src/edit/geom.ts         vertex edits on one feature
     src/start/scopes.ts      global / hemispheric / local / data: CRS and background defaults
     src/start/locate.ts      typed places and coordinates, device location

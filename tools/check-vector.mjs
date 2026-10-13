@@ -32,6 +32,10 @@
 //    them, not by the digits of the code, so any geographic CRS gets a
 //    span in degrees kept inside the world.
 //
+// 7. The pointer in the layer CRS (edit/pointer.ts): a screen pixel goes
+//    display -> lon/lat -> layer CRS and lands where PROJ puts it; pixels
+//    off the globe, or beyond the poles of a lon/lat map, give nothing.
+//
 //   node tools/check-vector.mjs
 import { build } from 'esbuild';
 import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -66,7 +70,8 @@ writeFileSync(entry, [
   "export * from './src/vector/reproject';",
   "export * from './src/vector/write';",
   "export * as geom from './src/edit/geom';",
-  "export * as scopes from './src/start/scopes';"
+  "export * as scopes from './src/start/scopes';",
+  "export * as pointer from './src/edit/pointer';"
 ].join('\n') + '\n');
 try {
   await build({ entryPoints: [entry], bundle: true, format: 'cjs', platform: 'node', outfile: bundle, logLevel: 'error' });
@@ -424,6 +429,51 @@ for (const c of cases) {
   check(lonlatEdge.maxX <= 180 && lonlatEdge.maxY <= 90, `a geographic extent stays inside the world (${lonlatEdge.maxX}, ${lonlatEdge.maxY})`);
   const merc = wgis.scopes.paddedExtent({ minX: 19000000, maxX: 20000000, minY: 0, maxY: 1000000 }, 'EPSG:3857');
   check(merc.maxX <= 20037508.35, `a Web Mercator extent stays inside the world (${merc.maxX})`);
+}
+
+// --- 7. The pointer in the layer CRS -------------------------------------------
+
+{
+  const W = 1000, H = 800;
+  const view = (crs, zoom) => ({ crs, centreX: 0, centreY: 0, zoom, width: W, height: H });
+  // The oracle's own screen -> display, so pointer.ts is not checked against itself.
+  const display = (v, sx, sy) => Float64Array.of((sx - W / 2) / 2 ** v.zoom, -(sy - H / 2) / 2 ** v.zoom);
+  const agrees = async (v, layer, oracle, pixels, tolM) => {
+    for (const [sx, sy] of pixels) {
+      const got = wgis.pointer.pointerToLayer({ view: v, wrap: null }, sx, sy, layer.wgis);
+      check(got !== null && !(got instanceof Promise), `pixel ${sx},${sy} on ${oracle}: answered at once, in proj4js`);
+      if (!got || got instanceof Promise) continue;
+      const want = await transform(oracle, layer.proj, display(v, sx, sy));
+      const err = Math.hypot(got[0] - want[0], got[1] - want[1]);
+      check(err <= tolM, `pixel ${sx},${sy} on ${oracle} into ${layer.wgis}: ${err.toFixed(3)} from PROJ`);
+    }
+  };
+  const off = (v, layer, pixels, what) => {
+    for (const [sx, sy] of pixels) {
+      const got = wgis.pointer.pointerToLayer({ view: v, wrap: null }, sx, sy, layer.wgis);
+      check(got === null, `pixel ${sx},${sy} ${what} gives no position (${got})`);
+    }
+  };
+
+  // An orthographic globe over Tasmania, about 13000 km across the canvas.
+  // On a sphere: proj4js's ortho is spherical only, while PROJ's is
+  // ellipsoidal, and on WGS84 they part by kilometres towards the limb,
+  // which would measure the libraries and not the pointer.
+  const orthoSphere = '+proj=ortho +lat_0=-30 +lon_0=147 +x_0=0 +y_0=0 +R=6371007 +units=m';
+  const globe = view(orthoSphere, -14);
+  await agrees(globe, POLAR, orthoSphere, [[500, 400], [500, 700], [300, 650], [750, 520]], 1);
+  off(globe, POLAR, [[500, 0], [0, 0], [999, 799]], 'off the globe');
+
+  // Lon/lat at a degree a pixel: the display round trip is the identity
+  // beyond the poles, so latitude is what rules those pixels out.
+  const plate = view('EPSG:4326', 0);
+  await agrees(plate, POLAR, 'OGC:CRS84', [[500, 470], [600, 460], [420, 480]], 1);
+  off(plate, POLAR, [[500, 0], [500, 799]], 'beyond a pole of a lon/lat map');
+
+  // The layer in the display CRS: the display point itself.
+  const same = wgis.pointer.pointerToLayer({ view: globe, wrap: null }, 700, 300, orthoSphere);
+  const d = display(globe, 700, 300);
+  check(same && same[0] === d[0] && same[1] === d[1], 'a layer in the display CRS gets the display point');
 }
 
 await proj.shutdown();

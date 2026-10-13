@@ -128,22 +128,14 @@ export class VectorEngine {
   }
 
   /**
-   * The topmost feature under a screen point (CSS pixels), or -1. Tested
-   * against what is drawn: points and lines within tolPx, polygons inside
-   * their fill (or on their outline when they could not be filled).
+   * The topmost feature under a display point, or -1. The point is in the
+   * base copy of the world, where display geometry lives (edit/pointer.ts
+   * screenToDisplay makes one from the pointer). Tested against what is
+   * drawn: points and lines within tolPx, polygons inside their fill (or on
+   * their outline when they could not be filled).
    */
-  hitTest(ctx: RenderContext, sx: number, sy: number, tolPx = 6): number {
-    const { view } = ctx;
-    const s = Math.pow(2, view.zoom);
-    let x = view.centreX + (sx - view.width / 2) / s;
-    let y = view.centreY - (sy - view.height / 2) / s;
-    if (ctx.wrap) {
-      // Display geometry lives in the base copy of the world.
-      const k = copyIndex(ctx.wrap, x, y);
-      x -= k * ctx.wrap.tx;
-      y -= k * ctx.wrap.ty;
-    }
-    const d = tolPx / s;
+  hitTest(ctx: RenderContext, x: number, y: number, tolPx = 6): number {
+    const d = tolPx / Math.pow(2, ctx.view.zoom);
     for (let i = this.display.length - 1; i >= 0; i--) {
       const f = this.display[i];
       if (x < f.minX - d || x > f.maxX + d || y < f.minY - d || y > f.maxY + d) continue;
