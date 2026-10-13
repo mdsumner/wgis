@@ -37,6 +37,18 @@ import * as proj from 'proj-wasm';
 import { parquetWriteBuffer } from 'hyparquet-writer';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
+
+// proj-wasm listens for uncaughtException and unhandledRejection, which
+// turns off Node's own crash on them: an error thrown here would stop the
+// script silently with exit 0. So fail unless the end is reached, and say
+// what went wrong.
+process.exitCode = 1;
+const stopped = (e) => {
+  console.log(`FAIL check-vector stopped: ${e && e.stack ? e.stack : e}`);
+  process.exit(1);
+};
+process.on('uncaughtException', stopped);
+process.on('unhandledRejection', stopped);
 const require = createRequire(import.meta.url);
 
 const entry = join(root, '.vector-entry.ts');
@@ -359,3 +371,4 @@ if (failures) {
   process.exit(1);
 }
 console.log('\nall vector checks passed');
+process.exitCode = 0;
