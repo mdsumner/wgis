@@ -26,6 +26,7 @@
 import { GridMesh } from './mesh';
 import { RasterSource, FloatStats } from '../core/source';
 import { WrapSpec } from '../core/wrap';
+import { ResampleAlg } from '../core/warp';
 
 export type Curve = 'linear' | 'sqrt' | 'log';
 
@@ -99,6 +100,26 @@ export interface EngineStatus {
   validFraction: number;
   /** statistics of the numeric data currently loaded, if any */
   stats: FloatStats | null;
+  /**
+   * A line for the layer's caption, if the engine has something to say
+   * (the warp engine: which backend, how long, or why not).
+   * wgis divergence from ortho-cog-viewer.
+   */
+  detail?: string;
+}
+
+/**
+ * The warp engine's settings, which the shell holds and the link carries.
+ * wgis divergence from ortho-cog-viewer: defined here, not in
+ * warpEngine.ts, so the seam can pass them without naming an engine.
+ */
+export interface WarpOptions {
+  alg: ResampleAlg;
+  /** warp pixels per screen pixel: 1 is exact, 0.5 is four times faster */
+  scale: number;
+  prefer: 'rwarp' | 'reference';
+  /** approximate-transformer threshold in source pixels; 0 is exact */
+  maxError: number;
 }
 
 /**
@@ -147,4 +168,12 @@ export interface LayerEngine extends EngineSeam<void, EngineStatus> {
 
   draw(ctx: RenderContext): void;
   drawWireframe(ctx: RenderContext, colour: [number, number, number, number]): void;
+
+  /**
+   * New settings from the shell, for an engine that has any (the warp
+   * engine); the shell calls it on every engine of the current kind
+   * rather than asking which kind it is. wgis divergence from
+   * ortho-cog-viewer.
+   */
+  setOptions?(opts: WarpOptions): void;
 }
