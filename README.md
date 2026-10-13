@@ -81,7 +81,10 @@ picked with "open file", or files dropped on the map.
   horizon of a globe and are cut at the antimeridian of a world
   projection instead of crossing it.
 - Vector layers go in the shareable link (the "link" button) with their
-  colour, opacity and fill. Local files cannot.
+  colour, opacity, fill and line width. What a link cannot carry is this
+  page's only: local files, temporary layers (drawn, pasted or made with
+  "new layer") are left out, and a layer opened from a URL goes in as that
+  URL, so its unsaved edits are not in the link. Save them to keep them.
 
 **Drawing and editing**, in each layer's own CRS (the Edit panel):
 
