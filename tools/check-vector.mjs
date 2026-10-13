@@ -34,7 +34,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as proj from 'proj-wasm';
-import { parquetWriteBuffer } from 'hyparquet-writer';
+import { parquetWriteBuffer, geojsonToWkb } from 'hyparquet-writer';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -130,6 +130,27 @@ const kinds = (d) => d.features.map((f) => f.kind).join(',');
     `GeoParquet: GEOMETRY crs projjson:<key> read from the metadata (${d.crs}, ${d.crsOrigin})`);
   const missing = await wgis.readVectorFile(parquet('projjson:nowhere', [])).then(() => 'read', (e) => e.message);
   check(/no nowhere metadata/.test(missing), `GeoParquet: projjson:<key> with no such key is refused (${missing})`);
+}
+{
+  // Geodesic edges would be read as straight in lon/lat, a different line
+  // (call C), so they are refused: GeoParquet's `edges`, and Parquet's
+  // GEOGRAPHY type.
+  const line = { type: 'LineString', coordinates: [[100, -60], [160, -60]] };
+  const refused = (file) => wgis.readVectorFile(file).then(() => 'read', (e) => e.message);
+  const geo = { version: '1.1.0', primary_column: 'geometry', columns: { geometry: { encoding: 'WKB', geometry_types: ['LineString'], edges: 'spherical' } } };
+  const viaGeo = await refused(new File([parquetWriteBuffer({
+    columnData: [{ name: 'geometry', data: [geojsonToWkb(line)], type: 'BYTE_ARRAY' }],
+    kvMetadata: [{ key: 'geo', value: JSON.stringify(geo) }]
+  })], 'spherical.parquet'));
+  check(/spherical edges/.test(viaGeo), `GeoParquet: edges "spherical" is refused (${viaGeo})`);
+  const viaType = await refused(new File([parquetWriteBuffer({
+    columnData: [{ name: 'geometry', data: [line] }],
+    schema: [
+      { name: 'root', num_children: 1 },
+      { name: 'geometry', type: 'BYTE_ARRAY', repetition_type: 'OPTIONAL', logical_type: { type: 'GEOGRAPHY' } }
+    ]
+  })], 'geography.parquet'));
+  check(/edges; wgis draws edges straight/.test(viaType), `GeoParquet: a GEOGRAPHY column is refused (${viaType})`);
 }
 
 // --- 2. Densification against PROJ ------------------------------------------

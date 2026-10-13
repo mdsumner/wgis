@@ -142,6 +142,9 @@ when the PR closes.)
 - Vectors are drawn with Canvas 2D. Layers over 5,000 vertices are thinned
   while the view moves and redrawn in full when it settles.
 - GeoParquet geometry must be WKB (not the native GeoArrow encodings).
+- GeoParquet with spherical edges (`edges` in the metadata, or Parquet's
+  GEOGRAPHY type) is refused: edges are straight in the layer CRS, and a
+  geodesic edge option is still to do.
 - No styling by attribute, and no identify beyond selecting.
 - Editing: no snapping, no holes or multi-part drawing (they survive
   editing when they come from a file), and temporary layers live only in

@@ -6,7 +6,8 @@
  *   FlatGeobuf  the header carries the CRS (an authority code or WKT).
  *   GeoParquet  `geo` metadata gives the primary column and its CRS as
  *               PROJJSON; no `crs` key means OGC:CRS84. Parquet's own
- *               GEOMETRY logical type works too.
+ *               GEOMETRY logical type works too. Spherical edges (`edges`
+ *               in the metadata, or the GEOGRAPHY type) are refused.
  *
  * A `#crs=` fragment on a URL overrides whatever the file says, for files
  * that are wrong or silent about it. Whole files are read: bbox-limited
@@ -214,6 +215,15 @@ interface AsyncBuffer {
   slice(start: number, end?: number): ArrayBuffer | Promise<ArrayBuffer>;
 }
 
+/**
+ * wgis draws an edge straight in the layer's CRS (call C). A geodesic edge
+ * read that way would be a different line, so such files are refused until
+ * a geodesic edge option exists.
+ */
+function sphericalMessage(column: string, edges: string): string {
+  return `GeoParquet column ${column} has ${edges.toLowerCase()} edges; wgis draws edges straight in the layer CRS and does not read geodesic edges yet`;
+}
+
 async function readGeoParquet(file: AsyncBuffer): Promise<Parsed> {
   const metadata = await parquetMetadataAsync(file);
   const geoKV = metadata.key_value_metadata?.find((kv: { key: string }) => kv.key === 'geo')?.value;
@@ -226,6 +236,7 @@ async function readGeoParquet(file: AsyncBuffer): Promise<Parsed> {
     if (meta.encoding && meta.encoding !== 'WKB') {
       throw new Error(`GeoParquet column ${column} is ${meta.encoding}; only WKB is read so far`);
     }
+    if (meta.edges && meta.edges !== 'planar') throw new Error(sphericalMessage(column, meta.edges));
     // No crs key means OGC:CRS84; an explicit null means "not stated".
     if (!('crs' in meta)) crs = 'EPSG:4326';
     else if (meta.crs) crs = projjsonCRS(meta.crs);
@@ -234,7 +245,8 @@ async function readGeoParquet(file: AsyncBuffer): Promise<Parsed> {
     const el = metadata.schema.find((s: any) => s.logical_type?.type === 'GEOMETRY' || s.logical_type?.type === 'GEOGRAPHY');
     if (!el) throw new Error('No geometry column: neither GeoParquet metadata nor a GEOMETRY column');
     column = el.name;
-    const lt = el.logical_type as { crs?: string };
+    const lt = el.logical_type as { type: string; crs?: string; algorithm?: string };
+    if (lt.type === 'GEOGRAPHY') throw new Error(sphericalMessage(column, lt.algorithm ?? 'spherical'));
     if (!lt.crs) crs = 'EPSG:4326';
     else if (lt.crs.startsWith('projjson:')) {
       // The PROJJSON is in the file's key-value metadata, under this key.
