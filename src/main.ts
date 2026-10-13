@@ -980,8 +980,8 @@ function drawVectors(ctx: RenderContext): void {
   overlayCtx.setTransform(1, 0, 0, 1, 0, 0);
   overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
   overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  if (coastline && showCoastline) coastline.draw(overlayCtx, ctx);
-  for (const v of vectorLayers) v.engine.draw(overlayCtx, ctx);
+  if (coastline && showCoastline) coastline.draw(ctx, overlayCtx);
+  for (const v of vectorLayers) v.engine.draw(ctx, overlayCtx);
   editor?.draw(overlayCtx, ctx);
 }
 

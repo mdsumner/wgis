@@ -1,7 +1,8 @@
 /**
  * Draws one vector layer on a 2D canvas above the WebGL map.
  *
- * The same three verbs as a raster LayerEngine, split by cost:
+ * It implements the engine seam (engine/types.ts EngineSeam), with the 2D
+ * context as the surface it draws on. The verbs are split by cost:
  *
  *   layout()   every view change. Projects and densifies for the new
  *              display CRS and zoom. A small layer is done in full; a large
@@ -18,7 +19,7 @@
  * vertices; a WebGL engine can replace it behind the same verbs.
  */
 
-import { RenderContext } from '../engine/types';
+import { EngineSeam, RenderContext } from '../engine/types';
 import { copyIndex } from '../core/wrap';
 import { Feature, GeomKind, VectorData, featureBounds, vertexCount } from './types';
 import { DensifiedPart, DisplayPath, densifyParts, runAsync, runSync } from './densify';
@@ -76,7 +77,7 @@ const LIVE_VERTICES = 5_000;
 const TOL_PX = 0.5;
 const ROUND_TRIP_PX = 2;
 
-export class VectorEngine {
+export class VectorEngine implements EngineSeam<CanvasRenderingContext2D, VectorStatus> {
   readonly kind = 'canvas';
   readonly data: VectorData;
   private style: VectorStyle;
@@ -212,7 +213,7 @@ export class VectorEngine {
     return this.thinned;
   }
 
-  draw(g: CanvasRenderingContext2D, ctx: RenderContext): void {
+  draw(ctx: RenderContext, g: CanvasRenderingContext2D): void {
     drawDisplay(g, ctx, this.display, this.style);
   }
 

@@ -101,15 +101,43 @@ export interface EngineStatus {
   stats: FloatStats | null;
 }
 
-export interface LayerEngine {
+/**
+ * What the shell drives on every layer, raster or vector: the three verbs
+ * and the housekeeping around them. `Surface` is what draw() puts pixels
+ * on: nothing for the raster engines, which hold their WebGL context, a 2D
+ * canvas context for the vector engine (vector/vectorEngine.ts).
+ *
+ * wgis divergence from ortho-cog-viewer: upstream has LayerEngine alone;
+ * wgis splits out this part so the vector engine sits behind the same seam
+ * without a raster source.
+ */
+export interface EngineSeam<Surface = void, Status = EngineStatus> {
   readonly kind: string;
+
+  /** Recompute geometry for this view. Called on every view change. */
+  layout(ctx: RenderContext): void;
+
+  /**
+   * Ensure what is drawn suits this view. Debounced by the shell. May
+   * resolve true when the result wants a redraw the engine did not ask for.
+   */
+  refresh(ctx: RenderContext): Promise<boolean | void>;
+
+  /** Drop cached results so the next layout or refresh makes them again. */
+  invalidate(): void;
+
+  draw(ctx: RenderContext, surface: Surface): void;
+
+  status(): Status;
+  dispose(): void;
+}
+
+/** A raster layer's engine: the seam, plus a source, a style and a wireframe. */
+export interface LayerEngine extends EngineSeam<void, EngineStatus> {
   readonly source: RasterSource;
 
   /** Uniforms only; never refetches. */
   setStyle(style: Style): void;
-
-  /** Recompute geometry for this view. Called on every view change. */
-  layout(ctx: RenderContext): void;
 
   /** Ensure the pixels on the GPU suit this view. Debounced by the shell. */
   refresh(ctx: RenderContext): Promise<void>;
@@ -119,7 +147,4 @@ export interface LayerEngine {
 
   draw(ctx: RenderContext): void;
   drawWireframe(ctx: RenderContext, colour: [number, number, number, number]): void;
-
-  status(): EngineStatus;
-  dispose(): void;
 }

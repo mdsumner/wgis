@@ -36,6 +36,10 @@
 //    display -> lon/lat -> layer CRS and lands where PROJ puts it; pixels
 //    off the globe, or beyond the poles of a lon/lat map, give nothing.
 //
+// 8. The engine seam (engine/types.ts EngineSeam): the vector engine is
+//    driven by the seam's verbs alone, as the shell drives any engine, and
+//    draws its layer on the surface it is given.
+//
 //   node tools/check-vector.mjs
 import { build } from 'esbuild';
 import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -71,7 +75,8 @@ writeFileSync(entry, [
   "export * from './src/vector/write';",
   "export * as geom from './src/edit/geom';",
   "export * as scopes from './src/start/scopes';",
-  "export * as pointer from './src/edit/pointer';"
+  "export * as pointer from './src/edit/pointer';",
+  "export { VectorEngine, defaultVectorStyle } from './src/vector/vectorEngine';"
 ].join('\n') + '\n');
 try {
   await build({ entryPoints: [entry], bundle: true, format: 'cjs', platform: 'node', outfile: bundle, logLevel: 'error' });
@@ -474,6 +479,42 @@ for (const c of cases) {
   const same = wgis.pointer.pointerToLayer({ view: globe, wrap: null }, 700, 300, orthoSphere);
   const d = display(globe, 700, 300);
   check(same && same[0] === d[0] && same[1] === d[1], 'a layer in the display CRS gets the display point');
+}
+
+// --- 8. The engine seam ---------------------------------------------------------
+
+{
+  // Only the seam's members, in the order the shell uses them.
+  const SEAM = ['kind', 'layout', 'refresh', 'invalidate', 'draw', 'status', 'dispose'];
+  const drive = async (engine, ctx, surface) => {
+    const missing = SEAM.filter((k) => !(k in engine));
+    engine.layout(ctx);
+    const changed = await engine.refresh(ctx);
+    engine.draw(ctx, surface);
+    const before = engine.status();
+    engine.invalidate();
+    engine.layout(ctx);
+    const after = engine.status();
+    engine.dispose();
+    return { missing, changed, before, after, gone: engine.status() };
+  };
+  // A 2D context that counts what it was asked to draw.
+  const calls = { moveTo: 0, lineTo: 0, stroke: 0, fill: 0 };
+  const surface = new Proxy({}, {
+    get: (_, k) => (k in calls ? () => { calls[k]++; } : () => {}),
+    set: () => true
+  });
+  const data = await sample('polar-box-3031.fgb');
+  const engine = new wgis.VectorEngine(data, wgis.defaultVectorStyle('#ff0000'), () => {});
+  const view = { crs: orthoSouth, centreX: 0, centreY: 0, zoom: -14, width: 1000, height: 800 };
+  const r = await drive(engine, { view, grid: null, wrap: null }, surface);
+  check(r.missing.length === 0, `the vector engine has every member of the seam (missing: ${r.missing.join(', ') || 'none'})`);
+  check(typeof r.changed === 'boolean' || r.changed === undefined, `refresh resolves as the seam says (${r.changed})`);
+  check(r.before.drawnPoints > 0 && r.before.drawnPoints === r.after.drawnPoints,
+    `layout through the seam densifies the layer, and again after invalidate (${r.before.drawnPoints}, ${r.after.drawnPoints} points)`);
+  check(calls.moveTo > 0 && calls.lineTo > 0 && calls.stroke > 0 && calls.fill > 0,
+    `draw(ctx, surface) draws on the surface given (${calls.moveTo} moveTo, ${calls.lineTo} lineTo, ${calls.fill} fill)`);
+  check(r.gone.drawnPoints === 0, `dispose leaves nothing to draw (${r.gone.drawnPoints})`);
 }
 
 await proj.shutdown();
