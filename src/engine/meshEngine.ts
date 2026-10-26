@@ -11,6 +11,8 @@
 
 import { MeshRenderer } from './MeshRenderer';
 import { buildLayerGeometry, buildLayerGeometryAsync, LayerGeometry } from './uv';
+// wgis divergence from ortho-cog-viewer (d352f7e): refine.ts, and laidOut,
+// refined, refineSeq, viewKey() and settle() below.
 import { refineSync, refineAsync, RefineOptions } from './refine';
 import { GeoTransform, geoTransform } from '../core/transform';
 import { Executor } from '../core/crs';

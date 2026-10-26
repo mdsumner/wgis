@@ -32,7 +32,10 @@ export function isLocalUrl(url: string): boolean {
   return url.startsWith('local:');
 }
 
-/** A GeoTIFF by name, type, or its first four bytes (II*\0 or MM\0*). */
+/**
+ * A GeoTIFF by name, type, or its first four bytes (II*\0 or MM\0*).
+ * wgis divergence from ortho-cog-viewer (47d2fdf).
+ */
 export async function isTiffFile(file: File): Promise<boolean> {
   if (/\.(tiff?|cog)$/i.test(file.name) || file.type === 'image/tiff') return true;
   const b = new Uint8Array(await file.slice(0, 4).arrayBuffer());
@@ -368,6 +371,8 @@ export class COGSource implements RasterSource {
     }
 
     console.log(`COG fetch level ${level} window [${x0},${y0},${x1},${y1}] -> ${outW}x${outH}`);
+    // wgis divergence from ortho-cog-viewer (94f9812); upstream a19d544 fixes
+    // this differently, through its picture path.
     // YCbCr (GDAL's default for JPEG-in-TIFF) has to be converted, which
     // readRGB does; read as plain samples it shows as false colour.
     if (image.fileDirectory.PhotometricInterpretation === 6) {

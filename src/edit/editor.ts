@@ -2,12 +2,12 @@
  * Drawing and editing vector layers, in each layer's own CRS.
  *
  * The pointer is on the display; the feature is in its layer's CRS. A click
- * goes screen -> display -> lon/lat -> layer CRS (with the display's round
- * trip test, so a click off the edge of the world adds nothing), and every
- * vertex is stored there. Edges are straight in the layer CRS, so a line
- * drawn into an EPSG:3031 layer while looking at an orthographic globe
- * bends as it is drawn: the sketch is densified for the display exactly
- * like the layer is.
+ * goes screen -> display -> lon/lat -> layer CRS in one function,
+ * pointerToLayer in pointer.ts (with the display's round trip test, so a
+ * click off the edge of the world adds nothing), and every vertex is stored
+ * there. Edges are straight in the layer CRS, so a line drawn into an
+ * EPSG:3031 layer while looking at an orthographic globe bends as it is
+ * drawn: the sketch is densified for the display exactly like the layer is.
  *
  * Modes
  *   pan       the map moves; nothing else happens
@@ -37,7 +37,6 @@
  */
 
 import { RenderContext } from '../engine/types';
-import { geoTransform } from '../core/transform';
 import { copyIndex } from '../core/wrap';
 import { Feature } from '../vector/types';
 import {
@@ -48,6 +47,7 @@ import { cloneFeatures, reprojectFeatures } from '../vector/reproject';
 import { toGeoJSONText } from '../vector/write';
 import { readGeoJSONText } from '../vector/read';
 import * as G from './geom';
+import { pointerToLayer, screenToDisplay } from './pointer';
 
 export type EditMode = 'pan' | 'select' | 'point' | 'line' | 'polygon' | 'vertex';
 
@@ -228,48 +228,6 @@ export class Editor {
     return [e.clientX - r.left, e.clientY - r.top];
   }
 
-  /** Screen (CSS pixels) to display, reduced into the base copy of the world. */
-  private toDisplay(ctx: RenderContext, sx: number, sy: number): [number, number] {
-    const v = ctx.view;
-    const s = Math.pow(2, v.zoom);
-    let x = v.centreX + (sx - v.width / 2) / s;
-    let y = v.centreY - (sy - v.height / 2) / s;
-    if (ctx.wrap) {
-      const k = copyIndex(ctx.wrap, x, y);
-      x -= k * ctx.wrap.tx;
-      y -= k * ctx.wrap.ty;
-    }
-    return [x, y];
-  }
-
-  /**
-   * Display point to a layer CRS: null when it is off the map, undefined
-   * when only the asynchronous path (PROJ in wasm) can answer.
-   */
-  private toLayerSync(ctx: RenderContext, x: number, y: number, crs: string): Float64Array | null | undefined {
-    if (crs.trim() === ctx.view.crs.trim()) return Float64Array.of(x, y);
-    const d = geoTransform(ctx.view.crs), l = geoTransform(crs);
-    if (!d.toGeoSync || !d.fromGeoSync || !l.fromGeoSync) return undefined;
-    const ll = d.toGeoSync(Float64Array.of(x, y));
-    if (!onEarth(ll) || !this.homes(ctx, x, y, d.fromGeoSync(ll))) return null;
-    return finite(l.fromGeoSync(ll));
-  }
-
-  private async toLayer(ctx: RenderContext, x: number, y: number, crs: string): Promise<Float64Array | null> {
-    const now = this.toLayerSync(ctx, x, y, crs);
-    if (now !== undefined) return now;
-    const d = geoTransform(ctx.view.crs), l = geoTransform(crs);
-    const ll = await d.toGeo(Float64Array.of(x, y));
-    if (!onEarth(ll) || !this.homes(ctx, x, y, await d.fromGeo(ll))) return null;
-    return finite(await l.fromGeo(ll));
-  }
-
-  /** The display's validity test: the point's round trip comes home. */
-  private homes(ctx: RenderContext, x: number, y: number, back: Float64Array): boolean {
-    const tol = 2 / Math.pow(2, ctx.view.zoom);
-    return Math.hypot(back[0] - x, back[1] - y) <= tol;
-  }
-
   /**
    * A value computed asynchronously, remembered under a key. Until it
    * lands this returns the previous value when `stale` is allowed (fine for
@@ -357,7 +315,7 @@ export class Editor {
   private handleAt(ctx: RenderContext, sx: number, sy: number): Handle | null {
     const hs = this.handles(ctx);
     if (!hs || hs.length > MAX_HANDLES * 2) return null;
-    const [x, y] = this.toDisplay(ctx, sx, sy);
+    const [x, y] = screenToDisplay(ctx, sx, sy);
     const d = HANDLE_PX / Math.pow(2, ctx.view.zoom);
     let best: Handle | null = null, bestD = Infinity;
     for (const h of hs) {
@@ -372,7 +330,7 @@ export class Editor {
   private hitAt(ctx: RenderContext, sx: number, sy: number): { layer: EditLayer; index: number } | null {
     const layers = this.host.layers();
     for (let i = layers.length - 1; i >= 0; i--) {
-      const index = layers[i].engine.hitTest(ctx, sx, sy);
+      const index = layers[i].engine.hitTest(ctx, ...screenToDisplay(ctx, sx, sy));
       if (index >= 0) return { layer: layers[i], index };
     }
     return null;
@@ -405,7 +363,7 @@ export class Editor {
       }
     }
     if (this.selLayer && this.sel.size && !e.shiftKey) {
-      const index = this.selLayer.engine.hitTest(ctx, sx, sy);
+      const index = this.selLayer.engine.hitTest(ctx, ...screenToDisplay(ctx, sx, sy));
       if (index >= 0 && this.sel.has(index)) {
         this.startDrag('move', this.selLayer, null, ctx, sx, sy);
         return true;
@@ -417,11 +375,9 @@ export class Editor {
   private startDrag(kind: Drag['kind'], layer: EditLayer, handle: Handle | null, ctx: RenderContext, sx: number, sy: number): void {
     const drag: Drag = { kind, layer, handle, start: null, preview: null };
     this.drag = drag;
-    const [x, y] = this.toDisplay(ctx, sx, sy);
-    const crs = layer.engine.data.crs;
-    const now = this.toLayerSync(ctx, x, y, crs);
-    if (now !== undefined) drag.start = now;
-    else void this.toLayer(ctx, x, y, crs).then((p) => { if (this.drag === drag) drag.start = p; });
+    const start = pointerToLayer(ctx, sx, sy, layer.engine.data.crs);
+    if (start instanceof Promise) void start.then((p) => { if (this.drag === drag) drag.start = p; });
+    else drag.start = start;
     this.host.canvas.style.cursor = kind === 'move' ? 'move' : 'pointer';
   }
 
@@ -443,9 +399,8 @@ export class Editor {
     if (this.mode === 'line' || this.mode === 'polygon') {
       const layer = this.sketch?.layer ?? this.host.active();
       if (layer) {
-        const [x, y] = this.toDisplay(ctx, sx, sy);
         const seq = ++this.hoverSeq;
-        void this.toLayer(ctx, x, y, layer.engine.data.crs).then((p) => {
+        void Promise.resolve(pointerToLayer(ctx, sx, sy, layer.engine.data.crs)).then((p) => {
           if (seq !== this.hoverSeq) return;
           this.hover = p;
           if (this.sketch) this.host.render();
@@ -453,7 +408,7 @@ export class Editor {
       }
     }
     this.host.canvas.style.cursor = this.cursorFor(this.hoverHandle ? 'handle'
-      : this.mode === 'select' && this.selLayer && this.sel.has(this.selLayer.engine.hitTest(ctx, sx, sy)) ? 'selected' : null);
+      : this.mode === 'select' && this.selLayer && this.sel.has(this.selLayer.engine.hitTest(ctx, ...screenToDisplay(ctx, sx, sy))) ? 'selected' : null);
   };
 
   private cursorFor(over: 'handle' | 'selected' | null): string {
@@ -467,9 +422,8 @@ export class Editor {
     const drag = this.drag!;
     const ctx = this.host.context();
     const [sx, sy] = this.local(e);
-    const [x, y] = this.toDisplay(ctx, sx, sy);
     const seq = ++this.dragSeq;
-    void this.toLayer(ctx, x, y, drag.layer.engine.data.crs).then((p) => {
+    void Promise.resolve(pointerToLayer(ctx, sx, sy, drag.layer.engine.data.crs)).then((p) => {
       if (seq !== this.dragSeq || this.drag !== drag || !p || !drag.start) return;
       const feats = drag.layer.engine.data.features;
       const preview = new Map<number, Feature>();
@@ -539,8 +493,7 @@ export class Editor {
           return;
         }
         const layer = this.sketch?.layer ?? this.target();
-        const [x, y] = this.toDisplay(ctx, sx, sy);
-        const p = await this.toLayer(ctx, x, y, layer.engine.data.crs);
+        const p = await pointerToLayer(ctx, sx, sy, layer.engine.data.crs);
         if (!p) {
           this.say(`that point is off the map, or has no position in ${layer.engine.data.crs}`);
           return;
@@ -877,16 +830,4 @@ export class Editor {
     drawDisplay(g, ctx, d.slice(nf), { ...SKETCH, fillOpacity: 0, radius: 3 });
     g.restore();
   }
-}
-
-/**
- * A lon/lat display passes its own round trip beyond the poles (it is the
- * identity there), so latitude is checked as well.
- */
-function onEarth(ll: Float64Array): boolean {
-  return Math.abs(ll[1]) <= 90 && isFinite(ll[0]);
-}
-
-function finite(p: Float64Array): Float64Array | null {
-  return isFinite(p[0]) && isFinite(p[1]) ? p : null;
 }

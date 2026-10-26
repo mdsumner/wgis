@@ -1,7 +1,8 @@
 /**
  * Draws one vector layer on a 2D canvas above the WebGL map.
  *
- * The same three verbs as a raster LayerEngine, split by cost:
+ * It implements the engine seam (engine/types.ts EngineSeam), with the 2D
+ * context as the surface it draws on. The verbs are split by cost:
  *
  *   layout()   every view change. Projects and densifies for the new
  *              display CRS and zoom. A small layer is done in full; a large
@@ -18,7 +19,7 @@
  * vertices; a WebGL engine can replace it behind the same verbs.
  */
 
-import { RenderContext } from '../engine/types';
+import { EngineSeam, RenderContext } from '../engine/types';
 import { copyIndex } from '../core/wrap';
 import { Feature, GeomKind, VectorData, featureBounds, vertexCount } from './types';
 import { DensifiedPart, DisplayPath, densifyParts, runAsync, runSync } from './densify';
@@ -76,7 +77,7 @@ const LIVE_VERTICES = 5_000;
 const TOL_PX = 0.5;
 const ROUND_TRIP_PX = 2;
 
-export class VectorEngine {
+export class VectorEngine implements EngineSeam<CanvasRenderingContext2D, VectorStatus> {
   readonly kind = 'canvas';
   readonly data: VectorData;
   private style: VectorStyle;
@@ -128,22 +129,14 @@ export class VectorEngine {
   }
 
   /**
-   * The topmost feature under a screen point (CSS pixels), or -1. Tested
-   * against what is drawn: points and lines within tolPx, polygons inside
-   * their fill (or on their outline when they could not be filled).
+   * The topmost feature under a display point, or -1. The point is in the
+   * base copy of the world, where display geometry lives (edit/pointer.ts
+   * screenToDisplay makes one from the pointer). Tested against what is
+   * drawn: points and lines within tolPx, polygons inside their fill (or on
+   * their outline when they could not be filled).
    */
-  hitTest(ctx: RenderContext, sx: number, sy: number, tolPx = 6): number {
-    const { view } = ctx;
-    const s = Math.pow(2, view.zoom);
-    let x = view.centreX + (sx - view.width / 2) / s;
-    let y = view.centreY - (sy - view.height / 2) / s;
-    if (ctx.wrap) {
-      // Display geometry lives in the base copy of the world.
-      const k = copyIndex(ctx.wrap, x, y);
-      x -= k * ctx.wrap.tx;
-      y -= k * ctx.wrap.ty;
-    }
-    const d = tolPx / s;
+  hitTest(ctx: RenderContext, x: number, y: number, tolPx = 6): number {
+    const d = tolPx / Math.pow(2, ctx.view.zoom);
     for (let i = this.display.length - 1; i >= 0; i--) {
       const f = this.display[i];
       if (x < f.minX - d || x > f.maxX + d || y < f.minY - d || y > f.maxY + d) continue;
@@ -220,7 +213,7 @@ export class VectorEngine {
     return this.thinned;
   }
 
-  draw(g: CanvasRenderingContext2D, ctx: RenderContext): void {
+  draw(ctx: RenderContext, g: CanvasRenderingContext2D): void {
     drawDisplay(g, ctx, this.display, this.style);
   }
 

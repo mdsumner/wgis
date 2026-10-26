@@ -11,6 +11,7 @@
  */
 
 import { SourceBounds } from '../core/bounds';
+import { crsDefinition } from '../core/crs';
 
 export type Scope = 'global' | 'hemi' | 'local' | 'data';
 
@@ -96,16 +97,29 @@ export function scopeOfLonLat(b: SourceBounds): Exclude<Scope, 'data'> {
 }
 
 /**
+ * What kind of CRS this is, read from its definition (the one crs.ts
+ * resolved, or the CRS itself when it is a proj string or WKT), never from
+ * the digits of its code.
+ */
+function crsKind(crs: string): 'lonlat' | 'webmercator' | 'other' {
+  const def = crsDefinition(crs) ?? crs;
+  if (/\+proj=(longlat|latlong|lonlat|latlon)\b/.test(def) || /^\s*GEOG(CRS|CS)\[/i.test(def)) return 'lonlat';
+  if (/\+proj=merc\b/.test(def) && /\+a=6378137\b/.test(def) && /\+b=6378137\b/.test(def)) return 'webmercator';
+  return 'other';
+}
+
+/**
  * A fixed-mode mesh extent around a layer's bounds: twice their size,
  * kept inside the world for lon/lat and Web Mercator, never empty.
  */
 export function paddedExtent(b: SourceBounds, crs: string): SourceBounds {
-  const lonlat = /4326|4269|4283|7844|CRS84|longlat/i.test(crs);
+  const kind = crsKind(crs);
+  const lonlat = kind === 'lonlat';
   const minSpan = lonlat ? 0.2 : 20_000;
   const w = Math.max(b.maxX - b.minX, minSpan), h = Math.max(b.maxY - b.minY, minSpan);
   const cx = (b.minX + b.maxX) / 2, cy = (b.minY + b.maxY) / 2;
   const out = { minX: cx - w, maxX: cx + w, minY: cy - h, maxY: cy + h };
-  const clamp = lonlat ? [180, 90] : /3857|900913/.test(crs) ? [20037508.34, 20037508.34] : null;
+  const clamp = lonlat ? [180, 90] : kind === 'webmercator' ? [20037508.34, 20037508.34] : null;
   if (clamp) {
     out.minX = Math.max(out.minX, -clamp[0]);
     out.maxX = Math.min(out.maxX, clamp[0]);
